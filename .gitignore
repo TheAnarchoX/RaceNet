@@ -142,3 +142,8 @@ telemetry_data/
 trained_models/
 race_logs/
 examples/*/output/
+
+# Agent system databases
+.racenet_memory.db
+.racenet_performance.db
+agent_logs/

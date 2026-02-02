@@ -178,6 +178,26 @@ Optional (Visualization):
 
 See [TASKS.md](TASKS.md) for implementation tasks that need to be completed. Tasks are ordered by priority and include clear acceptance criteria.
 
+### Autonomous Agent System
+
+RaceNet includes a self-improving autonomous agent system that can evolve the project automatically. The agent uses the GitHub Copilot SDK to work on tasks, coordinate as a hive mind, and learn from its own performance.
+
+```bash
+# Run a single autonomous agent
+python run_agent.py
+
+# Run 3 coordinated agents as a hive mind
+python run_agent.py --hive
+
+# Run with specific agent roles
+python run_agent.py --multi 5 --roles physics,track,ml,testing,generalist
+
+# View self-improvement report
+python run_agent.py --report
+```
+
+See [agent/README.md](agent/README.md) for detailed documentation on the agent system.
+
 ### GitHub Copilot Integration
 
 This repository includes custom instructions and agents for GitHub Copilot:

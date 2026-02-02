@@ -47,6 +47,12 @@ viz = [
     "matplotlib>=3.7.0",
     "pygame>=2.5.0",
 ]
+agent = [
+    "copilot-sdk>=0.1.0",
+]
+all = [
+    "racenet[dev,ml,viz,agent]",
+]
 
 [project.urls]
 Homepage = "https://github.com/TheAnarchoX/RaceNet"
