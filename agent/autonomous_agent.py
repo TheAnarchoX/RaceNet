@@ -6,10 +6,8 @@ Uses the GitHub Copilot SDK to work on tasks and evolve the project.
 """
 
 import asyncio
-import json
 import logging
 import re
-import signal
 import sys
 from typing import Any, Callable, Optional
 
@@ -167,30 +165,7 @@ class AutonomousAgent:
         # Setup logging
         self._setup_logging()
         
-        # Setup signal handlers for graceful shutdown
-        self._setup_signal_handlers()
         self._main_task = None
-    
-    def _setup_signal_handlers(self):
-        """Setup signal handlers for graceful shutdown."""
-        self._shutdown_count = 0
-        
-        def signal_handler(sig, frame):
-            self._shutdown_count += 1
-            
-            if self._shutdown_count == 1:
-                logger.info("\nShutdown signal received, cleaning up...")
-                self._shutting_down = True
-                # Cancel the main task to interrupt any blocking operations
-                if self._main_task and not self._main_task.done():
-                    self._main_task.cancel()
-            elif self._shutdown_count >= 2:
-                logger.warning("\nForced shutdown!")
-                import os
-                os._exit(1)
-        
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
     
     def _setup_logging(self):
         """Configure logging."""

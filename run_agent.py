@@ -484,5 +484,35 @@ async def main():
         await run_single_agent(args)
 
 
+def run_with_timeout():
+    """Run the main async function with a hard shutdown timeout."""
+    import signal
+    import os
+    
+    # Track if we're already shutting down
+    shutdown_initiated = False
+    
+    def force_exit(signum, frame):
+        nonlocal shutdown_initiated
+        if shutdown_initiated:
+            print("\n🔴 Forced shutdown!")
+            os._exit(1)
+        else:
+            shutdown_initiated = True
+            print("\n⏳ Shutting down (press Ctrl+C again to force)...")
+    
+    # Set up signal handlers before asyncio.run
+    signal.signal(signal.SIGINT, force_exit)
+    signal.signal(signal.SIGTERM, force_exit)
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n✅ Shutdown complete")
+    except Exception as e:
+        print(f"\n❌ Error: {e}")
+        sys.exit(1)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    run_with_timeout()
