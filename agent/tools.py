@@ -6,6 +6,7 @@ Tools that give the Copilot agent the ability to interact with the repository.
 
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -1016,7 +1017,7 @@ class ToolHandler:
         }
     
     def _mark_task_complete(self, params: dict) -> dict:
-        """Mark a task or specific acceptance criterion as complete."""
+        """Mark a task or specific acceptance criterion as complete in TASKS.md."""
         task_id = params["task_id"]
         criterion_index = params.get("criterion_index")
         
@@ -1033,22 +1034,58 @@ class ToolHandler:
                 "message": "Would mark task/criterion complete (dry run)"
             }
         
+        # Read current TASKS.md content
+        tasks_path = self.task_manager.tasks_path
+        content = tasks_path.read_text()
+        
+        # Find the task section in the file
+        task_pattern = rf'(### Task {re.escape(task_id)}:.*?)(?=### Task \d+\.\d+:|## Task Template|## Contributing|$)'
+        task_match = re.search(task_pattern, content, re.DOTALL)
+        
+        if not task_match:
+            return {"error": f"Could not find Task {task_id} section in TASKS.md"}
+        
+        task_section = task_match.group(1)
+        new_task_section = task_section
+        
         if criterion_index is not None:
+            # Mark specific criterion complete
+            # Find all acceptance criteria checkboxes in the task section
+            criteria_pattern = r'- \[ \]'
+            matches = list(re.finditer(criteria_pattern, new_task_section))
+            
+            if criterion_index >= len(matches):
+                return {"error": f"Criterion index {criterion_index} out of range (task has {len(matches)} unchecked criteria)"}
+            
+            # Replace the specific checkbox
+            match = matches[criterion_index]
+            new_task_section = (
+                new_task_section[:match.start()] +
+                '- [x]' +
+                new_task_section[match.end():]
+            )
+            
             self.task_manager.mark_criterion_complete(task_id, criterion_index)
-            return {
-                "status": "success",
-                "task_id": task_id,
-                "criterion": criterion_index,
-                "message": f"Marked criterion {criterion_index} complete. Remember to update TASKS.md."
-            }
+            message = f"Marked criterion {criterion_index} complete in TASKS.md"
         else:
+            # Mark all criteria as complete
+            new_task_section = re.sub(r'- \[ \]', '- [x]', new_task_section)
+            
             from agent.task_manager import TaskStatus
             self.task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
-            return {
-                "status": "success",
-                "task_id": task_id,
-                "message": "Marked task as complete. Remember to update TASKS.md."
-            }
+            message = f"Marked all acceptance criteria for Task {task_id} as complete in TASKS.md"
+        
+        # Replace the task section in the file
+        new_content = content[:task_match.start()] + new_task_section + content[task_match.end():]
+        
+        # Write updated content back to file
+        tasks_path.write_text(new_content)
+        
+        return {
+            "status": "success",
+            "task_id": task_id,
+            "message": message
+        }
     
     def _get_dependencies_graph(self, params: dict) -> dict:
         """Get task dependencies as a graph."""

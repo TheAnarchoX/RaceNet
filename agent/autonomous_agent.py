@@ -173,12 +173,21 @@ class AutonomousAgent:
     
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
+        self._shutdown_count = 0
+        
         def signal_handler(sig, frame):
-            logger.info("\nShutdown signal received...")
-            self._shutting_down = True
-            # Cancel the main task to interrupt any blocking operations
-            if self._main_task and not self._main_task.done():
-                self._main_task.cancel()
+            self._shutdown_count += 1
+            
+            if self._shutdown_count == 1:
+                logger.info("\nShutdown signal received, cleaning up...")
+                self._shutting_down = True
+                # Cancel the main task to interrupt any blocking operations
+                if self._main_task and not self._main_task.done():
+                    self._main_task.cancel()
+            elif self._shutdown_count >= 2:
+                logger.warning("\nForced shutdown!")
+                import os
+                os._exit(1)
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -386,6 +395,7 @@ Please:
 2. Make the necessary changes to fulfill the requirements
 3. Run tests to verify your changes work
 4. Commit your changes when done
+5. CRITICAL: When you've completed all requirements, use the mark_task_complete tool with task_id="{task.id}" to mark it done in TASKS.md
 
 Start by exploring the codebase and then implement the changes."""
 
@@ -505,23 +515,27 @@ For each task, provide clear requirements and acceptance criteria."""
             logger.debug("Session idle")
     
     async def _cleanup(self):
-        """Clean up resources using SDK best practices."""
+        """Clean up resources using SDK best practices with timeout protection."""
         # Destroy session (not close - SDK best practice)
         if self.session:
             try:
-                await self.session.destroy()
+                await asyncio.wait_for(self.session.destroy(), timeout=5.0)
                 logger.debug("Session destroyed")
+            except asyncio.TimeoutError:
+                logger.warning("Session destroy timed out")
             except Exception as e:
                 logger.warning(f"Error destroying session: {e}")
         
-        # Stop client and get any cleanup errors (SDK best practice)
+        # Stop client with timeout to prevent hanging
         if self.client:
             try:
-                errors = await self.client.stop()
+                errors = await asyncio.wait_for(self.client.stop(), timeout=5.0)
                 if errors:
                     for error in errors:
                         logger.warning(f"Cleanup error: {error.message}")
                 logger.debug("Client stopped")
+            except asyncio.TimeoutError:
+                logger.warning("Client stop timed out, forcing exit")
             except Exception as e:
                 logger.warning(f"Error stopping client: {e}")
         
