@@ -178,6 +178,36 @@ Optional (Visualization):
 
 See [TASKS.md](TASKS.md) for implementation tasks that need to be completed. Tasks are ordered by priority and include clear acceptance criteria.
 
+### GitHub Copilot Integration
+
+This repository includes custom instructions and agents for GitHub Copilot:
+
+**Custom Instructions** (`.github/copilot-instructions.md`):
+- Project-specific coding guidelines
+- Physics reference data for GT3 cars
+- Testing and documentation patterns
+
+**Prompt Files** (`.github/prompts/`):
+| Prompt | Purpose |
+|--------|---------|
+| `implement-task.prompt.md` | Implementing tasks from TASKS.md |
+| `add-car-component.prompt.md` | Adding new car components |
+| `add-telemetry-channel.prompt.md` | Adding telemetry channels |
+| `create-example.prompt.md` | Creating new examples |
+| `review-physics.prompt.md` | Reviewing physics implementations |
+
+**Custom Agents** (`.github/agents/`):
+| Agent | Expertise |
+|-------|-----------|
+| `physics-engineer` | Vehicle dynamics, tire models, aerodynamics |
+| `track-generator` | Procedural track generation, splines |
+| `ml-engineer` | RL environments, reward design, training |
+| `telemetry-specialist` | Data acquisition, analysis, export |
+| `task-implementer` | General task implementation |
+| `test-engineer` | Test coverage and quality |
+| `documentation-writer` | Technical documentation |
+| `code-reviewer` | Code review and quality |
+
 ## License
 
 MIT License - See LICENSE file for details.
