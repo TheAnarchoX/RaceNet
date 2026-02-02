@@ -1,0 +1,83 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "racenet"
+version = "0.1.0"
+description = "A GT3-style racing simulation framework for machine learning"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "RaceNet Contributors"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Games/Entertainment :: Simulation",
+]
+keywords = ["racing", "simulation", "machine-learning", "reinforcement-learning", "GT3"]
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "ruff>=0.1.0",
+    "mypy>=1.0.0",
+]
+ml = [
+    "gymnasium>=0.29.0",
+    "stable-baselines3>=2.0.0",
+    "torch>=2.0.0",
+]
+viz = [
+    "matplotlib>=3.7.0",
+    "pygame>=2.5.0",
+]
+agent = [
+    "copilot-sdk>=0.1.0",
+]
+all = [
+    "racenet[dev,ml,viz,agent]",
+]
+
+[project.urls]
+Homepage = "https://github.com/TheAnarchoX/RaceNet"
+Repository = "https://github.com/TheAnarchoX/RaceNet"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.black]
+line-length = 88
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "W", "I", "N", "UP", "B", "C4"]
+ignore = []
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
