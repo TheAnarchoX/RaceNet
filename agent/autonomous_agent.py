@@ -160,7 +160,9 @@ class AutonomousAgent:
         self._last_turn_end_time: float | None = None
         self._last_turn_start_time: float | None = None
         self._tool_start_times: dict[str, float] = {}
+        self._tool_call_names: dict[str, str] = {}
         self._perf_task: asyncio.Task | None = None
+        self._inflight_send_task: asyncio.Task | None = None
         
         # Setup logging
         self._setup_logging()
@@ -412,6 +414,9 @@ Start by reading TASKS.md, then systematically explore the source code."""
         # If so, automatically proceed with implementation
         await self._check_and_start_implementation()
 
+        # If task appears completed but not marked, mark it complete
+        self._maybe_mark_task_complete(task)
+
         if self.self_improvement and self.config.enable_self_improvement:
             duration = max(0.0, time.monotonic() - start_time)
             outcome_id = f"task_{task.id}_{int(time.time() * 1000)}"
@@ -459,6 +464,31 @@ Start by reading TASKS.md, then systematically explore the source code."""
         if any(indicator in response_lower for indicator in plan_indicators):
             logger.info("Plan detected, automatically starting implementation...")
             await self._send_message("start")
+
+    def _maybe_mark_task_complete(self, task) -> None:
+        response_lower = self._response_content.lower()
+        completion_signals = [
+            "no code changes needed",
+            "already implemented",
+            "already present",
+            "nothing to change",
+            "tests already passing",
+            "all tests passed",
+            "requirements are present",
+        ]
+        if not any(signal in response_lower for signal in completion_signals):
+            return
+
+        try:
+            result = self.tool_handler.handle_tool_call(
+                "mark_task_complete",
+                {"task_id": task.id},
+            )
+            logger.info("Marked Task %s complete due to completion signals", task.id)
+            if self.perf_logger.enabled:
+                self.perf_logger.log("task.auto_mark_complete", task_id=task.id, result=result)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning("Failed to auto-mark Task %s complete: %s", task.id, exc)
     
     async def _request_new_tasks(self):
         """Ask the agent to propose new tasks."""
@@ -494,6 +524,7 @@ For each task, provide clear requirements and acceptance criteria."""
                 )
 
         progress_task = None
+        send_task: asyncio.Task | None = None
 
         try:
             # Reset response buffer
@@ -506,13 +537,26 @@ For each task, provide clear requirements and acceptance criteria."""
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
             timeout = self.config.request_timeout
-            if self.config.turn_timeout_seconds:
-                timeout = min(timeout, int(self.config.turn_timeout_seconds))
+            inactivity_timeout = self.config.turn_timeout_seconds
             start = time.monotonic()
-            response = await asyncio.wait_for(
-                self.session.send_and_wait({"prompt": content}, timeout=timeout),
-                timeout=timeout,
+
+            send_task = asyncio.create_task(
+                self.session.send_and_wait({"prompt": content}, timeout=timeout)
             )
+            self._inflight_send_task = send_task
+
+            if inactivity_timeout:
+                inactivity_timeout = int(inactivity_timeout)
+                while True:
+                    done, _ = await asyncio.wait({send_task}, timeout=inactivity_timeout)
+                    if send_task in done:
+                        response = await send_task
+                        break
+                    if (time.monotonic() - self._last_event_time) >= inactivity_timeout:
+                        send_task.cancel()
+                        raise asyncio.TimeoutError()
+            else:
+                response = await send_task
             if self.perf_logger.enabled:
                 self.perf_logger.log(
                     "sdk.send_and_wait",
@@ -542,6 +586,8 @@ For each task, provide clear requirements and acceptance criteria."""
         finally:
             if progress_task:
                 progress_task.cancel()
+            if self._inflight_send_task is send_task:
+                self._inflight_send_task = None
 
     async def _recreate_session(self) -> None:
         if not self.client or not self._session_config:
@@ -625,6 +671,8 @@ For each task, provide clear requirements and acceptance criteria."""
             tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
             if tool_call_id:
                 self._tool_start_times[tool_call_id] = time.monotonic()
+                if tool_name:
+                    self._tool_call_names[tool_call_id] = tool_name
             logger.info(f"  → Running: {tool_name}")
         
         elif event_type_str == "tool.execution_complete":
@@ -636,6 +684,8 @@ For each task, provide clear requirements and acceptance criteria."""
                 getattr(event_data, "name", None) or
                 ""
             ) if event_data else ""
+            if not tool_name and tool_call_id:
+                tool_name = self._tool_call_names.pop(tool_call_id, "")
             if tool_call_id in self._tool_start_times and self.perf_logger.enabled:
                 start = self._tool_start_times.pop(tool_call_id)
                 self.perf_logger.log(
@@ -659,6 +709,12 @@ For each task, provide clear requirements and acceptance criteria."""
         logger.info("Starting agent cleanup...")
         if self._perf_task:
             self._perf_task.cancel()
+        if self._inflight_send_task and not self._inflight_send_task.done():
+            self._inflight_send_task.cancel()
+            try:
+                await asyncio.wait_for(self._inflight_send_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
         # Destroy session (not close - SDK best practice)
         if self.session:
             try:

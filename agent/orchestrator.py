@@ -12,6 +12,7 @@ import random
 import signal
 import sys
 import tracemalloc
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -158,7 +159,10 @@ class AgentWorker:
         self._last_turn_end_time: float | None = None
         self._last_turn_start_time: float | None = None
         self._tool_start_times: dict[str, float] = {}
+        self._tool_call_names: dict[str, str] = {}
         self._perf_task: asyncio.Task | None = None
+        self._last_event_time = time.monotonic()
+        self._inflight_send_task: asyncio.Task | None = None
         self._client = None
         self._session = None
         self._session_config: dict | None = None
@@ -570,6 +574,7 @@ class AgentWorker:
         try:
             await self._send_message(prompt)
             await self._check_and_start_implementation()
+            self._maybe_mark_task_complete(task)
             
             # Task completed (or attempted)
             self.memory.update_agent_state(
@@ -659,13 +664,30 @@ class AgentWorker:
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
             timeout = self.agent_config.request_timeout
-            if self.agent_config.turn_timeout_seconds:
-                timeout = min(timeout, int(self.agent_config.turn_timeout_seconds))
+            inactivity_timeout = self.agent_config.turn_timeout_seconds
             start = asyncio.get_event_loop().time()
-            response = await asyncio.wait_for(
-                self._session.send_and_wait({"prompt": content}, timeout=timeout),
-                timeout=timeout,
+
+            send_task = asyncio.create_task(
+                self._session.send_and_wait({"prompt": content}, timeout=timeout)
             )
+            self._inflight_send_task = send_task
+
+            if inactivity_timeout:
+                inactivity_timeout = int(inactivity_timeout)
+                while True:
+                    done, _ = await asyncio.wait({send_task}, timeout=inactivity_timeout)
+                    if send_task in done:
+                        response = await send_task
+                        break
+                    if (time.monotonic() - self._last_event_time) >= inactivity_timeout:
+                        send_task.cancel()
+                        try:
+                            await send_task
+                        except asyncio.CancelledError:
+                            pass
+                        raise asyncio.TimeoutError()
+            else:
+                response = await send_task
 
             if self.perf_logger.enabled:
                 self.perf_logger.log(
@@ -686,12 +708,17 @@ class AgentWorker:
                     timeout_seconds=timeout,
                 )
             logger.error(f"[{self.agent_id}] Request timed out after {timeout // 60} minutes")
+            self._running = False
+            self._shutting_down = True
+            self.memory.update_agent_state(self.agent_id, status="stopped", current_task="")
             await self._recreate_session()
         except Exception as e:
             logger.error(f"[{self.agent_id}] Error: {e}")
         finally:
             if progress_task:
                 progress_task.cancel()
+            if self._inflight_send_task is send_task:
+                self._inflight_send_task = None
 
     async def _check_and_start_implementation(self) -> None:
         response_lower = self._response_content.lower()
@@ -707,6 +734,31 @@ class AgentWorker:
         if any(indicator in response_lower for indicator in plan_indicators):
             logger.info(f"[{self.agent_id}] Plan detected, auto-starting implementation...")
             await self._send_message("start")
+
+    def _maybe_mark_task_complete(self, task: Task) -> None:
+        response_lower = self._response_content.lower()
+        completion_signals = [
+            "no code changes needed",
+            "already implemented",
+            "already present",
+            "nothing to change",
+            "tests already passing",
+            "all tests passed",
+            "requirements are present",
+        ]
+        if not any(signal in response_lower for signal in completion_signals):
+            return
+
+        try:
+            result = self.tool_handler.handle_tool_call(
+                "mark_task_complete",
+                {"task_id": task.id},
+            )
+            logger.info(f"[{self.agent_id}] Marked Task {task.id} complete due to completion signals")
+            if self.perf_logger.enabled:
+                self.perf_logger.log("task.auto_mark_complete", task_id=task.id, result=result)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"[{self.agent_id}] Failed to auto-mark Task {task.id} complete: {exc}")
 
     async def _recreate_session(self) -> None:
         if not self._client or not self._session_config:
@@ -737,6 +789,7 @@ class AgentWorker:
             event_type_str = str(event_type) if event_type else ""
         
         event_data = getattr(event, "data", None)
+        self._last_event_time = time.monotonic()
 
         def _extract_message_text(data):
             if not data:
@@ -788,6 +841,8 @@ class AgentWorker:
             tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
             if tool_call_id:
                 self._tool_start_times[tool_call_id] = asyncio.get_event_loop().time()
+                if tool_name:
+                    self._tool_call_names[tool_call_id] = tool_name
             logger.info(f"[{self.agent_id}]   → Running: {tool_name}")
         
         elif event_type_str == "tool.execution_complete":
@@ -798,6 +853,8 @@ class AgentWorker:
                 getattr(event_data, "name", None) or
                 ""
             ) if event_data else ""
+            if not tool_name and tool_call_id:
+                tool_name = self._tool_call_names.pop(tool_call_id, "")
             if tool_call_id in self._tool_start_times and self.perf_logger.enabled:
                 start = self._tool_start_times.pop(tool_call_id)
                 self.perf_logger.log(
@@ -911,7 +968,7 @@ class AgentWorker:
     
     def _get_hive_status(self, params: dict) -> str:
         """Get hive status."""
-        agents = self.memory.get_active_agents()
+        agents = [a for a in self.memory.get_active_agents() if a.status != "stopped"]
         summary = self.memory.get_summary()
         
         return json.dumps({
@@ -966,6 +1023,12 @@ class AgentWorker:
         logger.info(f"[{self.agent_id}] Cleaning up worker resources...")
         if self._perf_task:
             self._perf_task.cancel()
+        if self._inflight_send_task and not self._inflight_send_task.done():
+            self._inflight_send_task.cancel()
+            try:
+                await asyncio.wait_for(self._inflight_send_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                pass
         # Release any held file locks
         locks = self.memory.get_locked_files()
         for file_path, holder in locks.items():
@@ -1185,6 +1248,17 @@ class MultiAgentOrchestrator:
             
             # Check for stalled agents
             await self._check_agent_health()
+
+            # Stop if all agents are stopped/idle (nothing running)
+            agents_all = self.memory.get_all_agents()
+            active = [
+                a for a in self.memory.get_active_agents(timeout_seconds=120)
+                if a.status != "stopped"
+            ]
+            if not active and agents_all:
+                if all(a.status in ("stopped", "idle") for a in agents_all):
+                    logger.info("All agents stopped or idle; stopping orchestrator.")
+                    break
             
             # Reload tasks
             self.task_manager.reload()
@@ -1200,7 +1274,7 @@ class MultiAgentOrchestrator:
     
     def _print_status(self):
         """Print current status."""
-        agents = self.memory.get_active_agents()
+        agents = [a for a in self.memory.get_active_agents() if a.status != "stopped"]
         task_summary = self.task_manager.get_summary()
         knowledge_summary = self.memory.get_summary()
         
