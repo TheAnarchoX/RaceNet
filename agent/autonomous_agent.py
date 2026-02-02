@@ -311,8 +311,13 @@ For each task, provide clear requirements and acceptance criteria."""
                 self._response_content += content
         
         elif event_type_str == "tool.execution_start":
-            # Log tool execution start
-            tool_name = getattr(event_data, "toolName", "") if event_data else ""
+            # Log tool execution start - try multiple attribute names
+            tool_name = (
+                getattr(event_data, "toolName", None) or
+                getattr(event_data, "tool_name", None) or
+                getattr(event_data, "name", None) or
+                ""
+            ) if event_data else ""
             logger.info(f"  → Running: {tool_name}")
         
         elif event_type_str == "tool.execution_complete":
