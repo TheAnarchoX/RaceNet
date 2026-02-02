@@ -184,7 +184,7 @@ def print_banner(mode: str = "single"):
         banner = """
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                                                                       ║
-║   🏎️  RaceNet Autonomous Agent Hive                                  ║
+║   🏎️  RaceNet Autonomous Agent Hive                                   ║
 ║                                                                       ║
 ║   Powered by GitHub Copilot SDK + Hive Mind                           ║
 ║   Model: GPT-5.2-Codex                                                ║
@@ -203,7 +203,7 @@ def print_banner(mode: str = "single"):
         banner = """
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║   🏎️  RaceNet Autonomous Agent                               ║
+║   🏎️  RaceNet Autonomous Agent                                ║
 ║                                                               ║
 ║   Powered by GitHub Copilot SDK                               ║
 ║   Model: GPT-5.2-Codex                                        ║

@@ -92,12 +92,16 @@ class AutonomousAgent:
         
         # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
+        self._main_task = None
     
     def _setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
         def signal_handler(sig, frame):
             logger.info("\nShutdown signal received...")
             self._shutting_down = True
+            # Cancel the main task to interrupt any blocking operations
+            if self._main_task and not self._main_task.done():
+                self._main_task.cancel()
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -134,7 +138,11 @@ class AutonomousAgent:
                 logger.warning("Copilot SDK not installed - using mock client")
         
         try:
+            # Create a task so signal handler can cancel it
+            self._main_task = asyncio.current_task()
             await self._run()
+        except asyncio.CancelledError:
+            logger.info("Agent cancelled")
         except KeyboardInterrupt:
             logger.info("Agent interrupted by user")
         except FileNotFoundError:
@@ -234,6 +242,10 @@ Files to modify: {', '.join(task.files_to_modify)}
 
 Current state: {task.current_state}
 
+IMPORTANT: This is an autonomous agent session. Do NOT wait for manual confirmation.
+After creating any plan, immediately proceed with implementation.
+Do NOT ask me to say "start" - just implement directly.
+
 Please:
 1. First read the relevant files to understand the current implementation
 2. Make the necessary changes to fulfill the requirements
@@ -244,6 +256,28 @@ Start by exploring the codebase and then implement the changes."""
 
         # Send to Copilot and handle response
         await self._send_message(prompt)
+        
+        # Check if Copilot created a plan and is waiting for "start"
+        # If so, automatically proceed with implementation
+        await self._check_and_start_implementation()
+    
+    async def _check_and_start_implementation(self):
+        """Check if Copilot created a plan and auto-start implementation."""
+        response_lower = self._response_content.lower()
+        
+        # Detect plan creation patterns
+        plan_indicators = [
+            'say "start"',
+            "say 'start'",
+            "plan created",
+            "proceed with implementation",
+            "confirm to proceed",
+            "tell me to start",
+        ]
+        
+        if any(indicator in response_lower for indicator in plan_indicators):
+            logger.info("Plan detected, automatically starting implementation...")
+            await self._send_message("start")
     
     async def _request_new_tasks(self):
         """Ask the agent to propose new tasks."""
