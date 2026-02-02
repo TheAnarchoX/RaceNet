@@ -143,6 +143,16 @@ Examples:
         dest="enable_self_improvement",
         help="Disable self-improvement tracking"
     )
+    parser.add_argument(
+        "--turn-timeout",
+        type=int,
+        help="Timeout per assistant turn in seconds (overrides request timeout)"
+    )
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help="Enable fast mode with aggressive prompt/tool limits"
+    )
     
     # Safety settings
     parser.add_argument(
@@ -394,6 +404,8 @@ async def run_planner(args: argparse.Namespace):
         perf_log_path=args.perf_log,
         perf_sample_interval_seconds=args.perf_sample_interval,
         enable_tracemalloc=args.tracemalloc,
+        turn_timeout_seconds=args.turn_timeout,
+        fast_mode=args.fast,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -438,6 +450,8 @@ async def run_single_agent(args: argparse.Namespace):
         perf_log_path=args.perf_log,
         perf_sample_interval_seconds=args.perf_sample_interval,
         enable_tracemalloc=args.tracemalloc,
+        turn_timeout_seconds=args.turn_timeout,
+        fast_mode=args.fast,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -490,6 +504,8 @@ async def run_hive_mind(args: argparse.Namespace):
         perf_log_path=args.perf_log,
         perf_sample_interval_seconds=args.perf_sample_interval,
         enable_tracemalloc=args.tracemalloc,
+        turn_timeout_seconds=args.turn_timeout,
+        fast_mode=args.fast,
     )
     
     print(f"📁 Repository: {config.repo_root}")

@@ -71,6 +71,8 @@ class OrchestratorConfig:
     task_timeout_minutes: int = 30
     sync_interval_seconds: int = 30
     heartbeat_interval_seconds: int = 10
+    turn_timeout_seconds: int | None = None
+    fast_mode: bool = False
     
     # Agent roles (if empty, all are generalists)
     agent_roles: list[AgentRole] = field(default_factory=list)
@@ -135,6 +137,8 @@ class AgentWorker:
             perf_log_path=config.perf_log_path,
             perf_sample_interval_seconds=config.perf_sample_interval_seconds,
             enable_tracemalloc=config.enable_tracemalloc,
+            turn_timeout_seconds=config.turn_timeout_seconds,
+            fast_mode=config.fast_mode,
         )
 
         self.perf_logger = PerfLogger(config.perf_log_path, agent_id=agent_id)
@@ -157,6 +161,7 @@ class AgentWorker:
         self._perf_task: asyncio.Task | None = None
         self._client = None
         self._session = None
+        self._session_config: dict | None = None
     
     async def start(self):
         """Start the agent worker."""
@@ -240,6 +245,11 @@ class AgentWorker:
                 "tools": tools,
             }
         )
+        self._session_config = {
+            "system_message": {"content": system_message},
+            "model": self.config.model,
+            "tools": tools,
+        }
         
         # Register event handler using on() pattern (SDK best practice)
         self._session.on(self._handle_event)
@@ -452,6 +462,10 @@ class AgentWorker:
     - Acquire/release file locks before/after edits.
     - Share useful findings and message peers when blocked.
 
+    Autonomy:
+    - Do NOT ask for user confirmation. If a decision is needed, pick a reasonable default and proceed.
+    - If you create a plan, immediately execute it. Never wait for “start”.
+
     Current hive status:
     """
         # Add current hive status
@@ -550,10 +564,12 @@ class AgentWorker:
     Files: {', '.join(task.files_to_modify) if task.files_to_modify else 'Not specified'}
 
     Instructions: query_knowledge, acquire locks, implement, test, share, release locks, commit.
+    Autonomy: do NOT ask for confirmation. If you create a plan, execute it immediately.
     """
 
         try:
             await self._send_message(prompt)
+            await self._check_and_start_implementation()
             
             # Task completed (or attempted)
             self.memory.update_agent_state(
@@ -643,10 +659,12 @@ class AgentWorker:
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
             timeout = self.agent_config.request_timeout
+            if self.agent_config.turn_timeout_seconds:
+                timeout = min(timeout, int(self.agent_config.turn_timeout_seconds))
             start = asyncio.get_event_loop().time()
-            response = await self._session.send_and_wait(
-                {"prompt": content},
-                timeout=timeout
+            response = await asyncio.wait_for(
+                self._session.send_and_wait({"prompt": content}, timeout=timeout),
+                timeout=timeout,
             )
 
             if self.perf_logger.enabled:
@@ -661,12 +679,48 @@ class AgentWorker:
             return response
             
         except asyncio.TimeoutError:
+            if self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.send_timeout",
+                    duration_seconds=max(0.0, asyncio.get_event_loop().time() - start),
+                    timeout_seconds=timeout,
+                )
             logger.error(f"[{self.agent_id}] Request timed out after {timeout // 60} minutes")
+            await self._recreate_session()
         except Exception as e:
             logger.error(f"[{self.agent_id}] Error: {e}")
         finally:
             if progress_task:
                 progress_task.cancel()
+
+    async def _check_and_start_implementation(self) -> None:
+        response_lower = self._response_content.lower()
+        plan_indicators = [
+            'say "start"',
+            "say 'start'",
+            "plan created",
+            "proceed with implementation",
+            "confirm to proceed",
+            "please confirm",
+            "tell me to start",
+        ]
+        if any(indicator in response_lower for indicator in plan_indicators):
+            logger.info(f"[{self.agent_id}] Plan detected, auto-starting implementation...")
+            await self._send_message("start")
+
+    async def _recreate_session(self) -> None:
+        if not self._client or not self._session_config:
+            return
+        try:
+            if self._session:
+                await asyncio.wait_for(self._session.destroy(), timeout=5.0)
+        except Exception:
+            pass
+        try:
+            self._session = await self._client.create_session(self._session_config)
+            self._session.on(self._handle_event)
+        except Exception as exc:
+            logger.warning(f"[{self.agent_id}] Failed to recreate session: {exc}")
     
     def _handle_event(self, event):
         """Handle events from Copilot session.

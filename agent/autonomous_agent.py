@@ -39,6 +39,10 @@ Mission:
 - Follow project conventions (type hints, dataclasses, SI units, radians for angles).
 - Propose new tasks when needed.
 
+Autonomy:
+- Do NOT ask for user confirmation. If a decision is needed, pick a reasonable default and proceed.
+- If you create a plan, immediately execute it. Never wait for “start”.
+
 Tooling guidance (performance):
 - Prefer provided tools (read_file, list_directory, search_code).
 - Avoid many small reads; request larger slices or line ranges.
@@ -147,6 +151,7 @@ class AutonomousAgent:
         )
         self.client = None
         self.session = None
+        self._session_config: dict | None = None
         self._iteration = 0
         self._tasks_completed = 0
         self._shutting_down = False
@@ -266,6 +271,11 @@ class AutonomousAgent:
                 "tools": tools,
             }
         )
+        self._session_config = {
+            "system_message": {"content": system_msg},
+            "model": self.config.model,
+            "tools": tools,
+        }
         
         # Register event handler using session.on() pattern
         self.session.on(self._handle_event)
@@ -496,10 +506,12 @@ For each task, provide clear requirements and acceptance criteria."""
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
             timeout = self.config.request_timeout
+            if self.config.turn_timeout_seconds:
+                timeout = min(timeout, int(self.config.turn_timeout_seconds))
             start = time.monotonic()
-            response = await self.session.send_and_wait(
-                {"prompt": content},
-                timeout=timeout
+            response = await asyncio.wait_for(
+                self.session.send_and_wait({"prompt": content}, timeout=timeout),
+                timeout=timeout,
             )
             if self.perf_logger.enabled:
                 self.perf_logger.log(
@@ -517,12 +529,33 @@ For each task, provide clear requirements and acceptance criteria."""
             logger.info("Request cancelled")
             raise
         except asyncio.TimeoutError:
+            if self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.send_timeout",
+                    duration_seconds=max(0.0, time.monotonic() - start),
+                    timeout_seconds=timeout,
+                )
             logger.error(f"Request timed out after {timeout // 60} minutes")
+            await self._recreate_session()
         except Exception as e:
             logger.error(f"Error sending message: {e}")
         finally:
             if progress_task:
                 progress_task.cancel()
+
+    async def _recreate_session(self) -> None:
+        if not self.client or not self._session_config:
+            return
+        try:
+            if self.session:
+                await asyncio.wait_for(self.session.destroy(), timeout=5.0)
+        except Exception:
+            pass
+        try:
+            self.session = await self.client.create_session(self._session_config)
+            self.session.on(self._handle_event)
+        except Exception as exc:
+            logger.warning(f"Failed to recreate session: {exc}")
     
     def _handle_event(self, event: Any):
         """Handle events from Copilot session.

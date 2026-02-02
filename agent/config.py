@@ -27,6 +27,8 @@ class AgentConfig:
     auto_run_tests: bool = True
     request_timeout: int = 1800  # 30 minute timeout per request
     planner_mode: bool = False  # Dedicated planning/task management mode
+    turn_timeout_seconds: int | None = None
+    fast_mode: bool = False
 
     # Performance tuning
     read_file_max_chars: int = 20000
@@ -68,3 +70,13 @@ class AgentConfig:
             self.log_file = Path(self.log_file)
         if self.perf_log_path and isinstance(self.perf_log_path, str):
             self.perf_log_path = Path(self.perf_log_path)
+
+        if self.fast_mode:
+            self.auto_run_tests = False
+            self.auto_propose_tasks = False
+            self.prompt_max_chars = min(self.prompt_max_chars, 2000)
+            self.read_file_max_chars = min(self.read_file_max_chars, 8000)
+            self.list_directory_max_items = min(self.list_directory_max_items, 100)
+            self.tool_output_max_chars = min(self.tool_output_max_chars, 8000)
+            self.search_code_max_matches = min(self.search_code_max_matches, 20)
+            self.tool_cache_ttl_seconds = max(self.tool_cache_ttl_seconds, 60)
