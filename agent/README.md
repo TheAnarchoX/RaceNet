@@ -38,7 +38,7 @@ An autonomous, self-improving development agent system powered by the GitHub Cop
 
 2. **Copilot SDK** (optional, falls back to mock mode):
    ```bash
-   pip install copilot-sdk
+   pip install github-copilot-sdk
    ```
 
 ### Running the Agent

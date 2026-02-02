@@ -245,7 +245,7 @@ def check_prerequisites(repo_root: Path, tasks_file: str = "TASKS.md") -> bool:
         import copilot_sdk
     except ImportError:
         print("⚠️  copilot-sdk not installed. Will run in mock mode.")
-        print("   Install with: pip install copilot-sdk")
+        print("   Install with: pip install github-copilot-sdk")
     
     if issues:
         print("❌ Prerequisites check failed:")

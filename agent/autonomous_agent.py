@@ -16,7 +16,7 @@ from agent.tools import ToolHandler, create_tool_definitions
 
 # Try to import the Copilot SDK
 try:
-    from copilot_sdk import CopilotClient
+    from copilot import CopilotClient
     HAS_COPILOT_SDK = True
 except ImportError:
     HAS_COPILOT_SDK = False

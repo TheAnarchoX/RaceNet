@@ -146,7 +146,7 @@ class AgentWorker:
         """Main agent loop."""
         # Try to import Copilot SDK
         try:
-            from copilot_sdk import CopilotClient
+            from copilot import CopilotClient
         except ImportError:
             logger.warning(f"[{self.agent_id}] Copilot SDK not available, using mock")
             from agent.autonomous_agent import MockCopilotClient as CopilotClient
