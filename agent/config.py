@@ -25,6 +25,7 @@ class AgentConfig:
     max_tasks_per_session: int = 10
     auto_propose_tasks: bool = True
     auto_run_tests: bool = True
+    request_timeout: int = 1800  # 30 minute timeout per request
     
     # Safety settings
     require_approval_for_writes: bool = False

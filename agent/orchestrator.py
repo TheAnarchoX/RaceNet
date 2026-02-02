@@ -587,9 +587,10 @@ Start by exploring what you need to do."""
             
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
+            timeout = self.agent_config.request_timeout
             response = await self._session.send_and_wait(
                 {"prompt": content},
-                timeout=300  # 5 minute timeout
+                timeout=timeout
             )
             
             print()  # Newline after response
@@ -597,7 +598,7 @@ Start by exploring what you need to do."""
             return response
             
         except asyncio.TimeoutError:
-            logger.error(f"[{self.agent_id}] Request timed out")
+            logger.error(f"[{self.agent_id}] Request timed out after {timeout // 60} minutes")
         except Exception as e:
             logger.error(f"[{self.agent_id}] Error: {e}")
     

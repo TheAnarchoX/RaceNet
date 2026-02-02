@@ -305,9 +305,10 @@ For each task, provide clear requirements and acceptance criteria."""
             
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
+            timeout = self.config.request_timeout
             response = await self.session.send_and_wait(
                 {"prompt": content},
-                timeout=300  # 5 minute timeout
+                timeout=timeout
             )
             
             print()  # New line after response
@@ -316,7 +317,7 @@ For each task, provide clear requirements and acceptance criteria."""
             return response
             
         except asyncio.TimeoutError:
-            logger.error("Request timed out after 5 minutes")
+            logger.error(f"Request timed out after {timeout // 60} minutes")
         except Exception as e:
             logger.error(f"Error sending message: {e}")
     
