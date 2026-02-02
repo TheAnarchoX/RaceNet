@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Any, Callable, Optional
 
 from agent.config import AgentConfig
 from agent.memory import (
@@ -26,6 +26,15 @@ from agent.memory import (
 )
 from agent.task_manager import TaskManager, Task, TaskStatus
 from agent.tools import ToolHandler, create_tool_definitions
+
+try:
+    from copilot.types import Tool, ToolInvocation, ToolResult
+    HAS_COPILOT_SDK = True
+except ImportError:
+    Tool = None  # type: ignore[assignment]
+    ToolInvocation = dict  # type: ignore[assignment]
+    ToolResult = dict  # type: ignore[assignment]
+    HAS_COPILOT_SDK = False
 
 
 logger = logging.getLogger(__name__)
@@ -115,6 +124,8 @@ class AgentWorker:
         self.tool_handler = ToolHandler(self.agent_config, task_manager)
         self._current_task: Optional[Task] = None
         self._running = False
+        self._shutting_down = False
+        self._response_content = ""
         self._client = None
         self._session = None
     
@@ -158,22 +169,40 @@ class AgentWorker:
         
         self._client = CopilotClient(**client_options)
         
+        # Start client explicitly (SDK best practice)
+        try:
+            await self._client.start()
+            logger.info(f"[{self.agent_id}] Client started")
+        except FileNotFoundError:
+            logger.error(f"[{self.agent_id}] Copilot CLI not found")
+            return
+        except ConnectionError:
+            logger.error(f"[{self.agent_id}] Could not connect to Copilot CLI")
+            return
+        
         # Create session with hive mind context
-        tools = create_tool_definitions(self.agent_config)
+        tools = create_tool_definitions(self.agent_config, self.tool_handler)
         tools.extend(self._get_hive_tools())
         
         system_message = self._get_system_message()
         
         self._session = await self._client.create_session(
-            system_message={"content": system_message},
-            model=self.config.model,
-            tools=tools,
+            {
+                "system_message": {"content": system_message},
+                "model": self.config.model,
+                "tools": tools,
+            }
         )
+        
+        # Register event handler using on() pattern (SDK best practice)
+        self._session.on(self._handle_event)
+        
+        logger.info(f"[{self.agent_id}] Session created: {self._session.session_id}")
         
         self.memory.update_agent_state(self.agent_id, status="idle")
         
         # Main loop
-        while self._running:
+        while self._running and not self._shutting_down:
             # Check for messages from other agents
             await self._process_messages()
             
@@ -190,9 +219,32 @@ class AgentWorker:
             # Heartbeat
             self.memory.update_agent_state(self.agent_id, status="idle")
     
-    def _get_hive_tools(self) -> list[dict]:
+    def _build_hive_tool_handler(self) -> Callable[[ToolInvocation], ToolResult]:
+        async def handler(invocation: ToolInvocation) -> ToolResult:
+            try:
+                arguments = invocation.get("arguments") or {}
+                result = await self._handle_tool_call(
+                    invocation.get("tool_name", ""),
+                    arguments,
+                )
+                return {
+                    "textResultForLlm": result,
+                    "resultType": "success",
+                    "toolTelemetry": {},
+                }
+            except Exception as exc:  # pylint: disable=broad-except
+                return {
+                    "textResultForLlm": "Invoking this tool produced an error.",
+                    "resultType": "failure",
+                    "error": str(exc),
+                    "toolTelemetry": {},
+                }
+
+        return handler
+
+    def _get_hive_tools(self) -> list[Any]:
         """Get additional tools for hive coordination."""
-        return [
+        definitions = [
             {
                 "name": "share_knowledge",
                 "description": "Share a piece of knowledge with other agents",
@@ -316,7 +368,21 @@ class AgentWorker:
                 }
             },
         ]
-    
+
+        if not HAS_COPILOT_SDK:
+            return definitions
+
+        handler = self._build_hive_tool_handler()
+        return [
+            Tool(
+                name=definition["name"],
+                description=definition["description"],
+                parameters=definition.get("parameters"),
+                handler=handler,
+            )
+            for definition in definitions
+        ]
+
     def _get_system_message(self) -> str:
         """Get the system message with hive context."""
         base_message = f"""You are Agent {self.agent_id}, part of a hive of autonomous development agents working on RaceNet.
@@ -495,28 +561,60 @@ Start by exploring what you need to do."""
             self.memory.update_agent_state(self.agent_id, current_task="")
     
     async def _send_message(self, content: str):
-        """Send a message to Copilot and handle response."""
+        """Send a message to Copilot using SDK best practices."""
         try:
-            async for event in self._session.send_message_stream(content):
-                await self._handle_event(event)
+            # Reset response buffer
+            self._response_content = ""
+            
+            # Use send_and_wait() which combines send() with waiting for idle
+            # Events are still delivered to on() handlers while waiting
+            response = await self._session.send_and_wait(
+                {"prompt": content},
+                timeout=300  # 5 minute timeout
+            )
+            
+            print()  # Newline after response
+            
+            return response
+            
+        except asyncio.TimeoutError:
+            logger.error(f"[{self.agent_id}] Request timed out")
         except Exception as e:
             logger.error(f"[{self.agent_id}] Error: {e}")
     
-    async def _handle_event(self, event):
-        """Handle streaming events."""
+    def _handle_event(self, event):
+        """Handle events from Copilot session.
+        
+        SDK events are SessionEvent objects with:
+        - event.type: SessionEventType enum
+        - event.data: Event-specific data object
+        """
+        # Get event type - can be enum or string
         event_type = getattr(event, "type", None)
+        if hasattr(event_type, "value"):
+            event_type_str = event_type.value
+        else:
+            event_type_str = str(event_type) if event_type else ""
         
-        if event_type == "text":
-            text = getattr(event, "text", "")
-            if text:
-                print(f"[{self.agent_id}] {text}", end="", flush=True)
+        event_data = getattr(event, "data", None)
         
-        elif event_type == "tool_call":
-            result = await self._handle_tool_call(event.name, event.parameters)
-            await self._session.submit_tool_result(event.call_id, result)
+        if event_type_str == "assistant.message":
+            content = getattr(event_data, "content", "") if event_data else ""
+            if content:
+                print(f"[{self.agent_id}] {content}", end="", flush=True)
+                self._response_content += content
         
-        elif event_type == "done":
-            print()
+        elif event_type_str == "tool.execution_start":
+            tool_name = getattr(event_data, "toolName", "") if event_data else ""
+            logger.debug(f"[{self.agent_id}]   → Running: {tool_name}")
+        
+        elif event_type_str == "tool.execution_complete":
+            tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
+            logger.debug(f"[{self.agent_id}]   ✓ Completed: {tool_call_id}")
+        
+        elif event_type_str == "session.error":
+            message = getattr(event_data, "message", "Unknown error") if event_data else "Unknown error"
+            logger.error(f"[{self.agent_id}] Session error: {message}")
     
     async def _handle_tool_call(self, name: str, params: dict) -> str:
         """Handle tool calls including hive-specific tools."""
@@ -667,17 +765,31 @@ Start by exploring what you need to do."""
             )
     
     async def _cleanup(self):
-        """Clean up resources."""
+        """Clean up resources using SDK best practices."""
         # Release any held file locks
         locks = self.memory.get_locked_files()
         for file_path, holder in locks.items():
             if holder == self.agent_id:
                 self.memory.release_file_lock(file_path, self.agent_id)
         
+        # Destroy session (not close - SDK best practice)
         if self._session:
-            await self._session.close()
+            try:
+                await self._session.destroy()
+                logger.debug(f"[{self.agent_id}] Session destroyed")
+            except Exception as e:
+                logger.warning(f"[{self.agent_id}] Error destroying session: {e}")
+        
+        # Stop client and get cleanup errors (SDK best practice)
         if self._client:
-            await self._client.close()
+            try:
+                errors = await self._client.stop()
+                if errors:
+                    for error in errors:
+                        logger.warning(f"[{self.agent_id}] Cleanup error: {error.message}")
+                logger.debug(f"[{self.agent_id}] Client stopped")
+            except Exception as e:
+                logger.warning(f"[{self.agent_id}] Error stopping client: {e}")
 
 
 class MultiAgentOrchestrator:

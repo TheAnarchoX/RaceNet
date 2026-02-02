@@ -5,8 +5,10 @@ Main orchestration for the autonomous RaceNet development agent.
 Uses the GitHub Copilot SDK to work on tasks and evolve the project.
 """
 
+import asyncio
 import json
 import logging
+import signal
 import sys
 from typing import Any, Callable, Optional
 
@@ -82,9 +84,23 @@ class AutonomousAgent:
         self.session = None
         self._iteration = 0
         self._tasks_completed = 0
+        self._shutting_down = False
+        self._response_content = ""
         
         # Setup logging
         self._setup_logging()
+        
+        # Setup signal handlers for graceful shutdown
+        self._setup_signal_handlers()
+    
+    def _setup_signal_handlers(self):
+        """Setup signal handlers for graceful shutdown."""
+        def signal_handler(sig, frame):
+            logger.info("\nShutdown signal received...")
+            self._shutting_down = True
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
     
     def _setup_logging(self):
         """Configure logging."""
@@ -117,6 +133,10 @@ class AutonomousAgent:
             await self._run()
         except KeyboardInterrupt:
             logger.info("Agent interrupted by user")
+        except FileNotFoundError:
+            logger.error("Copilot CLI not found. Please install it first.")
+        except ConnectionError:
+            logger.error("Could not connect to Copilot CLI server.")
         except Exception as e:
             logger.exception(f"Agent failed with error: {e}")
         finally:
@@ -131,23 +151,32 @@ class AutonomousAgent:
         
         self.client = CopilotClient(**client_options)
         
-        # Create session with tools
-        tools = create_tool_definitions(self.config)
+        # Start the client explicitly (best practice from SDK cookbook)
+        await self.client.start()
+        logger.info("Copilot client started")
         
+        # Create session with tools
+        tools = create_tool_definitions(self.config, self.tool_handler)
+
         self.session = await self.client.create_session(
-            system_message={"content": SYSTEM_MESSAGE},
-            model=self.config.model,
-            tools=tools,
+            {
+                "system_message": {"content": SYSTEM_MESSAGE},
+                "model": self.config.model,
+                "tools": tools,
+            }
         )
         
-        logger.info("Copilot session created successfully")
+        # Register event handler using session.on() pattern
+        self.session.on(self._handle_event)
+        
+        logger.info(f"Copilot session created: {self.session.session_id}")
         
         # Get initial task summary
         summary = self.task_manager.get_summary()
         logger.info(f"Task Summary: {summary['completed']}/{summary['total']} completed ({summary['completion_percentage']:.1f}%)")
         
         # Main loop
-        while self._iteration < self.config.max_iterations:
+        while self._iteration < self.config.max_iterations and not self._shutting_down:
             self._iteration += 1
             logger.info(f"\n--- Iteration {self._iteration} ---")
             
@@ -221,50 +250,93 @@ For each task, provide clear requirements and acceptance criteria."""
         await self._send_message(prompt)
     
     async def _send_message(self, content: str):
-        """Send a message and handle the streaming response with tool calls."""
-        logger.info(f"Sending message to Copilot...")
+        """Send a message and wait for response using SDK best practices."""
+        logger.info("Sending message to Copilot...")
         
         try:
-            # Use streaming to handle tool calls
-            async for event in self.session.send_message_stream(content):
-                await self._handle_event(event)
+            # Reset response buffer
+            self._response_content = ""
+            
+            # Use send_and_wait() which combines send() with waiting for idle
+            # Events are still delivered to on() handlers while waiting
+            response = await self.session.send_and_wait(
+                {"prompt": content},
+                timeout=300  # 5 minute timeout
+            )
+            
+            print()  # New line after response
+            logger.info("Response complete")
+            
+            return response
+            
+        except asyncio.TimeoutError:
+            logger.error("Request timed out after 5 minutes")
         except Exception as e:
             logger.error(f"Error sending message: {e}")
     
-    async def _handle_event(self, event: Any):
-        """Handle a streaming event from Copilot."""
+    def _handle_event(self, event: Any):
+        """Handle events from Copilot session.
+        
+        SDK events are SessionEvent objects with:
+        - event.type: SessionEventType enum (e.g., SessionEventType.ASSISTANT_MESSAGE)
+        - event.data: Event-specific data object
+        """
+        # Get event type - can be enum or string
         event_type = getattr(event, "type", None)
+        if hasattr(event_type, "value"):
+            # It's an enum, get string value
+            event_type_str = event_type.value
+        else:
+            event_type_str = str(event_type) if event_type else ""
         
-        if event_type == "text":
-            # Print text content as it streams
-            text = getattr(event, "text", "")
-            if text:
-                print(text, end="", flush=True)
+        event_data = getattr(event, "data", None)
         
-        elif event_type == "tool_call":
-            # Handle tool calls
-            tool_name = event.name
-            tool_params = event.parameters
-            
-            logger.info(f"Tool call: {tool_name}")
-            logger.debug(f"Parameters: {json.dumps(tool_params, indent=2)}")
-            
-            # Execute the tool
-            result = self.tool_handler.handle_tool_call(tool_name, tool_params)
-            
-            # Send the result back
-            await self.session.submit_tool_result(event.call_id, result)
+        if event_type_str == "assistant.message":
+            # Handle assistant message
+            content = getattr(event_data, "content", "") if event_data else ""
+            if content:
+                print(content, end="", flush=True)
+                self._response_content += content
         
-        elif event_type == "done":
-            print()  # New line after streaming
-            logger.info("Response complete")
+        elif event_type_str == "tool.execution_start":
+            # Log tool execution start
+            tool_name = getattr(event_data, "toolName", "") if event_data else ""
+            logger.info(f"  → Running: {tool_name}")
+        
+        elif event_type_str == "tool.execution_complete":
+            # Log tool execution complete
+            tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
+            logger.debug(f"  ✓ Completed: {tool_call_id}")
+        
+        elif event_type_str == "session.error":
+            # Handle session errors
+            message = getattr(event_data, "message", "Unknown error") if event_data else "Unknown error"
+            logger.error(f"Session error: {message}")
+        
+        elif event_type_str == "session.idle":
+            # Session is idle (request complete)
+            logger.debug("Session idle")
     
     async def _cleanup(self):
-        """Clean up resources."""
+        """Clean up resources using SDK best practices."""
+        # Destroy session (not close - SDK best practice)
         if self.session:
-            await self.session.close()
+            try:
+                await self.session.destroy()
+                logger.debug("Session destroyed")
+            except Exception as e:
+                logger.warning(f"Error destroying session: {e}")
+        
+        # Stop client and get any cleanup errors (SDK best practice)
         if self.client:
-            await self.client.close()
+            try:
+                errors = await self.client.stop()
+                if errors:
+                    for error in errors:
+                        logger.warning(f"Cleanup error: {error.message}")
+                logger.debug("Client stopped")
+            except Exception as e:
+                logger.warning(f"Error stopping client: {e}")
         
         # Log summary
         logger.info("=" * 60)
@@ -287,30 +359,29 @@ class MockCopilotSession:
     
     def __init__(self, tool_handler: ToolHandler):
         self.tool_handler = tool_handler
+        self.session_id = "mock-session-001"
         self.messages = []
+        self._event_handlers = []
     
-    async def send_message_stream(self, content: str):
-        """Simulate streaming response."""
-        self.messages.append({"role": "user", "content": content})
-        
-        # Yield a simple response
-        class TextEvent:
-            type = "text"
-            text = f"\n[Mock Response] Received: {content[:100]}...\n"
-        
-        yield TextEvent()
-        
-        class DoneEvent:
-            type = "done"
-        
-        yield DoneEvent()
+    def on(self, handler: Callable):
+        """Register event handler (SDK pattern)."""
+        self._event_handlers.append(handler)
+        return lambda: self._event_handlers.remove(handler)
     
-    async def submit_tool_result(self, call_id: str, result: str):
-        """Handle tool result."""
-        pass
+    async def send_and_wait(self, options: dict, timeout: float = 60):
+        """Send a message and wait for idle (SDK pattern)."""
+        prompt = options.get("prompt", "")
+        self.messages.append({"role": "user", "content": prompt})
+        
+        # Dispatch mock events to handlers
+        for handler in self._event_handlers:
+            handler({"type": "assistant.message", "data": {"content": f"\n[Mock] Received: {prompt[:100]}...\n"}})
+            handler({"type": "session.idle", "data": {}})
+        
+        return None  # No final message in mock
     
-    async def close(self):
-        """Clean up."""
+    async def destroy(self):
+        """Destroy the session (SDK pattern)."""
         pass
 
 
@@ -320,14 +391,17 @@ class MockCopilotClient:
     def __init__(self, **kwargs):
         self.tool_handler = None
     
-    async def create_session(self, **kwargs):
+    async def start(self):
+        """Start the client (SDK pattern)."""
+        pass
+    
+    async def create_session(self, config: dict = None):
         """Create a mock session."""
-        # We'll need to set the tool handler after creation
         return MockCopilotSession(self.tool_handler)
     
-    async def close(self):
-        """Clean up."""
-        pass
+    async def stop(self):
+        """Stop the client (SDK pattern)."""
+        return []  # No errors
 
 
 # For environments without the SDK, provide a fallback

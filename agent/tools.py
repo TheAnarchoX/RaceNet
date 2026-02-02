@@ -8,15 +8,48 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Optional
 
 from agent.config import AgentConfig
 from agent.task_manager import TaskManager
 
+try:
+    from copilot.types import Tool, ToolInvocation, ToolResult
+    HAS_COPILOT_SDK = True
+except ImportError:
+    Tool = None  # type: ignore[assignment]
+    ToolInvocation = dict  # type: ignore[assignment]
+    ToolResult = dict  # type: ignore[assignment]
+    HAS_COPILOT_SDK = False
 
-def create_tool_definitions(config: AgentConfig) -> list[dict]:
+
+def _build_tool_handler(tool_handler: "ToolHandler") -> Callable[[ToolInvocation], ToolResult]:
+    async def handler(invocation: ToolInvocation) -> ToolResult:
+        try:
+            arguments = invocation.get("arguments") or {}
+            result = tool_handler.handle_tool_call(invocation.get("tool_name", ""), arguments)
+            return {
+                "textResultForLlm": result,
+                "resultType": "success",
+                "toolTelemetry": {},
+            }
+        except Exception as exc:  # pylint: disable=broad-except
+            return {
+                "textResultForLlm": "Invoking this tool produced an error.",
+                "resultType": "failure",
+                "error": str(exc),
+                "toolTelemetry": {},
+            }
+
+    return handler
+
+
+def create_tool_definitions(
+    config: AgentConfig,
+    tool_handler: Optional["ToolHandler"] = None,
+) -> list[Any]:
     """Create tool definitions for the Copilot SDK."""
-    return [
+    definitions = [
         {
             "name": "read_file",
             "description": "Read the contents of a file in the repository",
@@ -226,6 +259,20 @@ def create_tool_definitions(config: AgentConfig) -> list[dict]:
                 "required": ["message"]
             }
         },
+    ]
+
+    if not HAS_COPILOT_SDK or tool_handler is None:
+        return definitions
+
+    handler = _build_tool_handler(tool_handler)
+    return [
+        Tool(
+            name=definition["name"],
+            description=definition["description"],
+            parameters=definition.get("parameters"),
+            handler=handler,
+        )
+        for definition in definitions
     ]
 
 
