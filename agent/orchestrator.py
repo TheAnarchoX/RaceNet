@@ -847,6 +847,11 @@ Start by exploring what you need to do."""
                 logger.debug(f"[{self.agent_id}] Session destroyed")
             except asyncio.TimeoutError:
                 logger.warning(f"[{self.agent_id}] Session destroy timed out")
+            except OSError as e:
+                if getattr(e, "errno", None) == 32:
+                    logger.debug(f"[{self.agent_id}] Session destroy broken pipe during shutdown")
+                else:
+                    logger.warning(f"[{self.agent_id}] Error destroying session: {e}")
             except Exception as e:
                 logger.warning(f"[{self.agent_id}] Error destroying session: {e}")
         
@@ -856,7 +861,10 @@ Start by exploring what you need to do."""
                 errors = await asyncio.wait_for(self._client.stop(), timeout=5.0)
                 if errors:
                     for error in errors:
-                        logger.warning(f"[{self.agent_id}] Cleanup error: {error.message}")
+                        if "Broken pipe" in getattr(error, "message", ""):
+                            logger.debug(f"[{self.agent_id}] Cleanup warning suppressed: {error.message}")
+                        else:
+                            logger.warning(f"[{self.agent_id}] Cleanup error: {error.message}")
                 logger.debug(f"[{self.agent_id}] Client stopped")
             except asyncio.TimeoutError:
                 logger.warning(f"[{self.agent_id}] Client stop timed out")

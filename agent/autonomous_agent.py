@@ -457,6 +457,9 @@ For each task, provide clear requirements and acceptance criteria."""
 
             return response
 
+        except asyncio.CancelledError:
+            logger.info("Request cancelled")
+            raise
         except asyncio.TimeoutError:
             logger.error(f"Request timed out after {timeout // 60} minutes")
         except Exception as e:
@@ -546,6 +549,11 @@ For each task, provide clear requirements and acceptance criteria."""
                 logger.debug("Session destroyed")
             except asyncio.TimeoutError:
                 logger.warning("Session destroy timed out")
+            except OSError as e:
+                if getattr(e, "errno", None) == 32:
+                    logger.debug("Session destroy broken pipe during shutdown")
+                else:
+                    logger.warning(f"Error destroying session: {e}")
             except Exception as e:
                 logger.warning(f"Error destroying session: {e}")
         
@@ -555,7 +563,10 @@ For each task, provide clear requirements and acceptance criteria."""
                 errors = await asyncio.wait_for(self.client.stop(), timeout=5.0)
                 if errors:
                     for error in errors:
-                        logger.warning(f"Cleanup error: {error.message}")
+                        if "Broken pipe" in getattr(error, "message", ""):
+                            logger.debug(f"Cleanup warning suppressed: {error.message}")
+                        else:
+                            logger.warning(f"Cleanup error: {error.message}")
                 logger.debug("Client stopped")
             except asyncio.TimeoutError:
                 logger.warning("Client stop timed out, forcing exit")

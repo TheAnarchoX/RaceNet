@@ -488,6 +488,7 @@ def run_with_timeout():
     """Run the main async function with a hard shutdown timeout."""
     import signal
     import os
+    import asyncio
     
     # Track if we're already shutting down
     shutdown_initiated = False
@@ -507,17 +508,59 @@ def run_with_timeout():
             except Exception:
                 pass
     
-    # Set up signal handlers before asyncio.run
+    # Create event loop manually so we can cancel tasks on shutdown
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    main_task = loop.create_task(main())
+
+    def _cancel_all_tasks():
+        for task in asyncio.all_tasks(loop):
+            task.cancel()
+
+    # Set up signal handlers before running the loop
+    def force_exit(signum, frame):
+        nonlocal shutdown_initiated
+        if shutdown_initiated:
+            try:
+                os.write(2, "\n🔴 Forced shutdown!\n".encode("utf-8"))
+            except Exception:
+                pass
+            os._exit(1)
+        else:
+            shutdown_initiated = True
+            try:
+                os.write(2, "\n⏳ Shutting down (press Ctrl+C again to force)...\n".encode("utf-8"))
+            except Exception:
+                pass
+            _cancel_all_tasks()
+
     signal.signal(signal.SIGINT, force_exit)
     signal.signal(signal.SIGTERM, force_exit)
-    
+
     try:
-        asyncio.run(main())
+        loop.run_until_complete(main_task)
+    except asyncio.CancelledError:
+        try:
+            os.write(2, "\n✅ Shutdown complete\n".encode("utf-8"))
+        except Exception:
+            pass
     except KeyboardInterrupt:
-        print("\n✅ Shutdown complete")
+        try:
+            os.write(2, "\n✅ Shutdown complete\n".encode("utf-8"))
+        except Exception:
+            pass
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        try:
+            os.write(2, f"\n❌ Error: {e}\n".encode("utf-8"))
+        except Exception:
+            pass
         sys.exit(1)
+    finally:
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
 
 
 if __name__ == "__main__":
