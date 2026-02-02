@@ -182,21 +182,108 @@ See [TASKS.md](TASKS.md) for implementation tasks that need to be completed. Tas
 
 RaceNet includes a self-improving autonomous agent system that can evolve the project automatically. The agent uses the GitHub Copilot SDK to work on tasks, coordinate as a hive mind, and learn from its own performance.
 
+#### Core Commands
+
 ```bash
 # Run a single autonomous agent
 python run_agent.py
 
-# Run 3 coordinated agents as a hive mind
+# Run 3 coordinated agents as a hive mind (shortcut for --multi 3)
 python run_agent.py --hive
 
-# Run with specific agent roles
+# Run with specific agent roles and count
 python run_agent.py --multi 5 --roles physics,track,ml,testing,generalist
+
+# Run in strategic planner mode (task discovery/refinement)
+python run_agent.py --plan
 
 # View self-improvement report
 python run_agent.py --report
+
+# Run an improvement cycle and print recommendations
+python run_agent.py --improve
 ```
 
-See [agent/README.md](agent/README.md) for detailed documentation on the agent system.
+#### Hive vs. Multi
+
+- `--hive` is a convenience flag that starts a 3‑agent hive. It is equivalent to `--multi 3`.
+- `--multi N` starts a hive with **N** agents and is the preferred option when you want to control the size.
+- If both are provided, `--multi` takes precedence for agent count, and `--hive` just enables hive mode.
+
+#### Recommended Workflows
+
+```bash
+# Short, fast single-agent iteration (no auto-propose/tests)
+python run_agent.py --max-iterations 1 --max-tasks 1 --no-auto-propose --no-auto-test
+
+# Hive benchmark / speed check with per-turn timeout (non-dry-run)
+python run_agent.py --hive --max-iterations 1 --max-tasks 1 --no-auto-propose --no-auto-test --turn-timeout 120
+
+# Planner scan to update TASKS.md without running tests
+python run_agent.py --plan --no-auto-test
+```
+
+#### Example Hive Configurations
+
+```bash
+# 2-agent hive for quick parallel work
+python run_agent.py --multi 2 --max-iterations 1 --max-tasks 2 --no-auto-propose --no-auto-test
+
+# 3-agent hive with focused roles
+python run_agent.py --multi 3 --roles physics,track,testing --max-iterations 2 --max-tasks 2
+
+# 5-agent hive, broader coverage with explicit roles
+python run_agent.py --multi 5 --roles physics,track,ml,testing,generalist
+
+# Fast hive (short prompts and smaller tool outputs)
+python run_agent.py --hive --fast --turn-timeout 120
+```
+
+#### Common Scenarios ("Just run work")
+
+```bash
+# Do one task end-to-end, then stop
+python run_agent.py --max-iterations 1 --max-tasks 1
+
+# Do up to 3 tasks, no new task proposals
+python run_agent.py --max-iterations 5 --max-tasks 3 --no-auto-propose
+
+# Hive: complete 1 task per agent, then stop
+python run_agent.py --hive --max-iterations 1 --max-tasks 1 --no-auto-propose --no-auto-test
+
+# Hive: focus on testing/coverage work only
+python run_agent.py --multi 2 --roles testing,testing --max-iterations 2 --max-tasks 2
+```
+
+#### Performance & Diagnostics
+
+```bash
+# Performance logging (JSONL), memory sampling, and cProfile output
+python run_agent.py \
+    --perf-log /tmp/racenet_perf.jsonl \
+    --perf-sample-interval 10 \
+    --tracemalloc \
+    --profile /tmp/racenet_profile.prof
+
+# Cap per-turn inactivity to avoid long hangs (seconds)
+python run_agent.py --turn-timeout 120
+
+# Aggressive fast mode (smaller prompts/tool outputs, no auto-tests/propose)
+python run_agent.py --fast
+```
+
+#### Key Settings (CLI)
+
+- `--max-iterations`, `--max-tasks` — bound session work.
+- `--no-auto-propose`, `--no-auto-test` — disable task creation/tests.
+- `--turn-timeout` — inactivity timeout per assistant turn (seconds).
+- `--fast` — smaller prompts/tool outputs; disables auto-tests/proposals.
+- `--perf-log`, `--perf-sample-interval`, `--tracemalloc` — performance telemetry.
+- `--profile` — write cProfile stats to a file.
+- `--log-file`, `--log-level` — structured logging.
+- `--cli-url` — connect to an external Copilot CLI server.
+
+See [agent/README.md](agent/README.md) for deeper documentation.
 
 ### GitHub Copilot Integration
 
