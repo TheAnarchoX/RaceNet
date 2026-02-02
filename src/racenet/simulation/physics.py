@@ -113,7 +113,9 @@ class PhysicsEngine:
             New velocity
         """
         new_vel = velocity + acceleration * dt
-        # Apply linear damping
+        # Apply linear damping - simplified uniform energy dissipation model
+        # Applied uniformly rather than direction-dependent for simplicity.
+        # Represents combined effects of rolling resistance and minor losses.
         new_vel *= (1.0 - self.config.linear_damping)
         return new_vel
     

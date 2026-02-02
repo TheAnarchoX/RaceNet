@@ -236,7 +236,9 @@ class RaceEnv:
             self._off_track_time = 0.0
         
         # Check for lap completion
-        if distance < self._last_distance - self._track.length / 2:
+        # Use half track length as threshold to detect wraparound at start/finish
+        LAP_DETECTION_THRESHOLD = self._track.length / 2
+        if distance < self._last_distance - LAP_DETECTION_THRESHOLD:
             # Crossed start/finish line
             self._scoring.complete_lap(self._time)
         

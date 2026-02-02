@@ -247,6 +247,10 @@ class Tire:
     def _apply_combined_slip(self, fx: float, fy: float) -> tuple[float, float]:
         """Apply combined slip friction circle limitation.
         
+        Note: This is a simplified friction circle implementation.
+        A proper friction ellipse (Pacejka-style) would be more accurate.
+        See TASKS.md Task 1.1 for the full implementation plan.
+        
         Args:
             fx: Raw longitudinal force
             fy: Raw lateral force

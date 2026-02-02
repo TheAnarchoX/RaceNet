@@ -11,7 +11,7 @@ This module contains all car-related components:
 - Tires: Grip model, temperature, wear
 """
 
-from racenet.car.car import Car
+from racenet.car.car import Car, CarInputs, CarConfig
 from racenet.car.engine import Engine
 from racenet.car.transmission import Transmission
 from racenet.car.aero import Aero
@@ -22,6 +22,8 @@ from racenet.car.tires import Tire, TireSet
 
 __all__ = [
     "Car",
+    "CarInputs",
+    "CarConfig",
     "Engine",
     "Transmission",
     "Aero",

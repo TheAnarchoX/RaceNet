@@ -229,17 +229,21 @@ class Car:
         ground_speed = max(self.state.speed, 0.5)  # Avoid division by zero
         radius = self.tires.fl.radius
         
+        # Simplified slip calculation - placeholder pending proper tire physics
+        # See TASKS.md Task 1.1 for full Pacejka implementation plan
+        SIMPLIFIED_BRAKE_SLIP_FACTOR = 0.3  # Approximate slip from braking
+        
         # For rear-wheel drive GT3
         # Rear wheels get drive torque, all wheels get braking
-        fl_slip = -brake_front * 0.3  # Simplified slip from braking
-        fr_slip = -brake_front * 0.3
+        fl_slip = -brake_front * SIMPLIFIED_BRAKE_SLIP_FACTOR
+        fr_slip = -brake_front * SIMPLIFIED_BRAKE_SLIP_FACTOR
         
         # Rear has drive + brake
         rl_driven_slip = drive_torque / (self.chassis.total_mass * 9.81 * 0.5) * 0.5
         rr_driven_slip = drive_torque / (self.chassis.total_mass * 9.81 * 0.5) * 0.5
         
-        rl_slip = rl_driven_slip - brake_rear * 0.3
-        rr_slip = rr_driven_slip - brake_rear * 0.3
+        rl_slip = rl_driven_slip - brake_rear * SIMPLIFIED_BRAKE_SLIP_FACTOR
+        rr_slip = rr_driven_slip - brake_rear * SIMPLIFIED_BRAKE_SLIP_FACTOR
         
         return (
             np.clip(fl_slip, -0.5, 0.5),
