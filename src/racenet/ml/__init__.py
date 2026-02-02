@@ -8,12 +8,13 @@ This module contains:
 - MultiCarManager: Multi-car/multi-generation spawning
 """
 
-from racenet.ml.environment import RaceEnv
+from racenet.ml.environment import RaceEnv, RaceEnvConfig
 from racenet.ml.spaces import ObservationSpace, ActionSpace
 from racenet.ml.multi_car import MultiCarManager
 
 __all__ = [
     "RaceEnv",
+    "RaceEnvConfig",
     "ObservationSpace",
     "ActionSpace",
     "MultiCarManager",

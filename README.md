@@ -134,11 +134,29 @@ RaceNet/
 │   ├── telemetry/        # Data recording and export
 │   ├── scoring/          # Lap timing and style scoring
 │   └── ml/               # ML integration (Gym env, spaces)
+├── examples/             # Example scripts and use cases
+│   ├── basic_simulation/ # Basic car simulation
+│   ├── track_generation/ # Procedural track generation
+│   ├── telemetry_analysis/ # Recording and analyzing telemetry
+│   ├── ml_training/      # RL agent training
+│   └── multi_car/        # Population-based training
 ├── tests/                # Unit tests
 ├── TASKS.md              # Implementation tasks for contributors
 ├── pyproject.toml        # Project configuration
 └── README.md
 ```
+
+## Examples
+
+Check out the [examples/](examples/) directory for complete, runnable examples:
+
+| Example | Description |
+|---------|-------------|
+| [basic_simulation](examples/basic_simulation/) | Run a car simulation with manual inputs |
+| [track_generation](examples/track_generation/) | Generate procedural race tracks |
+| [telemetry_analysis](examples/telemetry_analysis/) | Record and export telemetry data |
+| [ml_training](examples/ml_training/) | Train an RL agent with Gymnasium |
+| [multi_car](examples/multi_car/) | Population-based multi-car training |
 
 ## Dependencies
 

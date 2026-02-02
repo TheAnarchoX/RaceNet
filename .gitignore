@@ -141,3 +141,4 @@ cython_debug/
 telemetry_data/
 trained_models/
 race_logs/
+examples/*/output/
