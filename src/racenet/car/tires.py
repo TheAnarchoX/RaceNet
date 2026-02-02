@@ -25,8 +25,16 @@ class TireConfig:
     rim_diameter_inch: float = 18.0
     
     # Grip coefficients
-    peak_mu_x: float = 1.6         # Longitudinal grip coefficient
-    peak_mu_y: float = 1.5         # Lateral grip coefficient
+    peak_mu_x: float = 1.65        # Longitudinal grip coefficient
+    peak_mu_y: float = 1.6         # Lateral grip coefficient
+
+    # Pacejka Magic Formula coefficients (tuned for GT3 slicks)
+    pacejka_bx: float = 30.0
+    pacejka_cx: float = 1.65
+    pacejka_ex: float = 0.9
+    pacejka_by: float = 56.0
+    pacejka_cy: float = 1.4
+    pacejka_ey: float = 0.9
     
     # Slip angles/ratios at peak grip
     optimal_slip_ratio: float = 0.10    # 10% slip for peak longitudinal
@@ -47,7 +55,9 @@ class TireConfig:
     worn_grip_factor: float = 0.85  # Grip at 100% wear
     
     # Load sensitivity (grip drops at higher loads)
-    load_sensitivity: float = 0.0001  # Grip reduction per N of load
+    nominal_load_n: float = 3500.0
+    load_sensitivity_linear: float = 0.0
+    load_sensitivity_quadratic: float = 0.0
 
 
 class Tire:
@@ -158,9 +168,15 @@ class Tire:
         Returns:
             Grip multiplier (0-1)
         """
-        # Higher load = slightly lower grip coefficient
-        reduction = load_n * self.config.load_sensitivity
-        return max(0.7, 1.0 - reduction)
+        if load_n <= 0.0:
+            return 0.0
+        
+        load_ratio = load_n / self.config.nominal_load_n
+        reduction = (
+            self.config.load_sensitivity_linear * (load_ratio - 1.0)
+            + self.config.load_sensitivity_quadratic * (load_ratio - 1.0) ** 2
+        )
+        return float(np.clip(1.0 + reduction, 0.7, 1.1))
     
     def _calculate_longitudinal_force(
         self,
@@ -169,7 +185,7 @@ class Tire:
     ) -> float:
         """Calculate longitudinal (traction/braking) force.
         
-        Uses simplified Pacejka-like curve.
+        Uses Pacejka Magic Formula for a GT3-style tire.
         
         Args:
             load_n: Vertical load
@@ -178,29 +194,22 @@ class Tire:
         Returns:
             Longitudinal force in N
         """
-        # Normalized slip
-        sr = abs(slip_ratio)
-        optimal = self.config.optimal_slip_ratio
+        if load_n <= 0.0:
+            return 0.0
         
-        if sr < optimal:
-            # Building up to peak - roughly linear
-            normalized_force = sr / optimal
-        else:
-            # Past peak - gradual falloff
-            excess = (sr - optimal) / optimal
-            falloff = 1.0 - (1.0 - self.config.slip_ratio_falloff) * min(excess, 1.0)
-            normalized_force = falloff
+        sr = abs(slip_ratio)
+        bx = self.config.pacejka_bx
+        cx = self.config.pacejka_cx
+        ex = self.config.pacejka_ex
+        pacejka = np.sin(cx * np.arctan(bx * sr - ex * (bx * sr - np.arctan(bx * sr))))
         
         # Apply modifiers
         temp_factor = self._get_temperature_factor()
         wear_factor = self._get_wear_factor()
         load_factor = self._get_load_factor(load_n)
         
-        # Calculate force
         mu = self.config.peak_mu_x * temp_factor * wear_factor * load_factor
-        force = mu * load_n * normalized_force
-        
-        # Apply sign
+        force = mu * load_n * pacejka
         return force if slip_ratio >= 0 else -force
     
     def _calculate_lateral_force(
@@ -210,7 +219,7 @@ class Tire:
     ) -> float:
         """Calculate lateral (cornering) force.
         
-        Uses simplified Pacejka-like curve.
+        Uses Pacejka Magic Formula for a GT3-style tire.
         
         Args:
             load_n: Vertical load
@@ -219,37 +228,28 @@ class Tire:
         Returns:
             Lateral force in N
         """
-        # Normalized slip angle
-        sa = abs(slip_angle_deg)
-        optimal = self.config.optimal_slip_angle_deg
+        if load_n <= 0.0:
+            return 0.0
         
-        if sa < optimal:
-            # Building up to peak
-            normalized_force = sa / optimal
-        else:
-            # Past peak - gradual falloff
-            excess = (sa - optimal) / optimal
-            falloff = 1.0 - (1.0 - self.config.slip_angle_falloff) * min(excess, 1.0)
-            normalized_force = falloff
+        sa = abs(np.radians(slip_angle_deg))
+        by = self.config.pacejka_by
+        cy = self.config.pacejka_cy
+        ey = self.config.pacejka_ey
+        pacejka = np.sin(cy * np.arctan(by * sa - ey * (by * sa - np.arctan(by * sa))))
         
         # Apply modifiers
         temp_factor = self._get_temperature_factor()
         wear_factor = self._get_wear_factor()
         load_factor = self._get_load_factor(load_n)
         
-        # Calculate force
         mu = self.config.peak_mu_y * temp_factor * wear_factor * load_factor
-        force = mu * load_n * normalized_force
+        force = mu * load_n * pacejka
         
         # Apply sign (positive slip angle = force to left)
         return -force if slip_angle_deg >= 0 else force
     
     def _apply_combined_slip(self, fx: float, fy: float) -> tuple[float, float]:
-        """Apply combined slip friction circle limitation.
-        
-        Note: This is a simplified friction circle implementation.
-        A proper friction ellipse (Pacejka-style) would be more accurate.
-        See TASKS.md Task 1.1 for the full implementation plan.
+        """Apply combined slip friction ellipse limitation.
         
         Args:
             fx: Raw longitudinal force
@@ -258,21 +258,25 @@ class Tire:
         Returns:
             Tuple of (adjusted_fx, adjusted_fy)
         """
-        # Calculate total force magnitude
-        total = np.sqrt(fx**2 + fy**2)
+        if self._load_n <= 0.0:
+            return 0.0, 0.0
         
-        if total < 1e-6:
+        temp_factor = self._get_temperature_factor()
+        wear_factor = self._get_wear_factor()
+        load_factor = self._get_load_factor(self._load_n)
+        
+        fx_limit = self.config.peak_mu_x * self._load_n * temp_factor * wear_factor * load_factor
+        fy_limit = self.config.peak_mu_y * self._load_n * temp_factor * wear_factor * load_factor
+        
+        if fx_limit <= 0.0 or fy_limit <= 0.0:
+            return 0.0, 0.0
+        
+        utilization = (fx / fx_limit) ** 2 + (fy / fy_limit) ** 2
+        if utilization <= 1.0:
             return fx, fy
         
-        # Maximum available force (simplified friction circle)
-        max_force = max(abs(fx), abs(fy)) * 1.1  # Slight overlap allowed
-        
-        if total > max_force:
-            # Scale down proportionally
-            scale = max_force / total
-            return fx * scale, fy * scale
-        
-        return fx, fy
+        scale = 1.0 / np.sqrt(utilization)
+        return fx * scale, fy * scale
     
     def update(
         self,
