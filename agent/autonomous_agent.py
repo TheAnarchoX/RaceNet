@@ -10,10 +10,13 @@ import logging
 import re
 import sys
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable
+
+import tracemalloc
 
 from agent.config import AgentConfig
 from agent.memory import RepositoryMemory
+from agent.perf import PerfLogger
 from agent.self_improvement import ActionOutcome, OutcomeType, SelfImprovementEngine
 from agent.task_manager import TaskManager
 from agent.tools import ToolHandler, create_tool_definitions
@@ -133,12 +136,14 @@ class AutonomousAgent:
             if config.enable_self_improvement
             else None
         )
+        self.perf_logger = PerfLogger(config.perf_log_path, agent_id="single-agent")
         self.tool_handler = ToolHandler(
             config,
             self.task_manager,
             memory=self.memory,
             self_improvement=self.self_improvement,
             agent_id="single-agent",
+            perf_logger=self.perf_logger,
         )
         self.client = None
         self.session = None
@@ -147,6 +152,10 @@ class AutonomousAgent:
         self._shutting_down = False
         self._response_content = ""
         self._last_event_time = time.monotonic()
+        self._last_turn_end_time: float | None = None
+        self._last_turn_start_time: float | None = None
+        self._tool_start_times: dict[str, float] = {}
+        self._perf_task: asyncio.Task | None = None
         
         # Setup logging
         self._setup_logging()
@@ -176,6 +185,11 @@ class AutonomousAgent:
         logger.info(f"Dry run: {self.config.dry_run}")
         logger.info("=" * 60)
 
+        if self.config.enable_tracemalloc:
+            tracemalloc.start()
+            if self.perf_logger.enabled:
+                self.perf_logger.log("tracemalloc.start")
+
         if self.memory:
             self.memory.register_agent("single-agent")
             self.memory.update_agent_state("single-agent", status="starting")
@@ -191,6 +205,7 @@ class AutonomousAgent:
         try:
             # Create a task so signal handler can cancel it
             self._main_task = asyncio.current_task()
+            self._start_perf_sampler()
             await self._run()
         except asyncio.CancelledError:
             logger.info("Agent cancelled")
@@ -350,13 +365,19 @@ Start by reading TASKS.md, then systematically explore the source code."""
         logger.info(f"Priority: {task.priority.name}, Difficulty: {task.difficulty.value}")
         
         # Create prompt for the task
+        description = self._truncate(task.description)
+        requirements = self._truncate(", ".join(task.requirements)) if task.requirements else "None"
+        acceptance = self._truncate(", ".join(t for _, t in task.acceptance_criteria)) if task.acceptance_criteria else "None"
+        files = ", ".join(task.files_to_modify) if task.files_to_modify else "Not specified"
+        current_state = self._truncate(task.current_state)
+
         prompt = f"""Work on Task {task.id}: {task.title}
 
-    Description: {task.description}
-    Requirements: {', '.join(task.requirements) if task.requirements else 'None'}
-    Acceptance: {', '.join(t for _, t in task.acceptance_criteria) if task.acceptance_criteria else 'None'}
-    Files: {', '.join(task.files_to_modify) if task.files_to_modify else 'Not specified'}
-    Current state: {task.current_state}
+    Description: {description}
+    Requirements: {requirements}
+    Acceptance: {acceptance}
+    Files: {files}
+    Current state: {current_state}
 
     Instructions:
     - Read relevant files first (use minimal, targeted tool calls).
@@ -404,6 +425,12 @@ Start by reading TASKS.md, then systematically explore the source code."""
                 current_task="",
                 tasks_completed=tasks_completed,
             )
+
+    def _truncate(self, text: str) -> str:
+        max_chars = max(256, int(self.config.prompt_max_chars))
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars - 3] + "..."
     
     async def _check_and_start_implementation(self):
         """Check if Copilot created a plan and auto-start implementation."""
@@ -469,10 +496,17 @@ For each task, provide clear requirements and acceptance criteria."""
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
             timeout = self.config.request_timeout
+            start = time.monotonic()
             response = await self.session.send_and_wait(
                 {"prompt": content},
                 timeout=timeout
             )
+            if self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.send_and_wait",
+                    duration_seconds=max(0.0, time.monotonic() - start),
+                    timeout_seconds=timeout,
+                )
 
             print()  # New line after response
             logger.info("Response complete")
@@ -530,8 +564,22 @@ For each task, provide clear requirements and acceptance criteria."""
                     self._response_content = self._response_content[-self.config.max_response_chars:]
         elif event_type_str == "assistant.turn_start":
             logger.info("Assistant turn started")
+            now = time.monotonic()
+            if self._last_turn_end_time is not None and self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.turn_gap",
+                    gap_seconds=max(0.0, now - self._last_turn_end_time),
+                )
+            self._last_turn_start_time = now
         elif event_type_str == "assistant.turn_end":
             logger.info("Assistant turn ended")
+            now = time.monotonic()
+            if self._last_turn_start_time is not None and self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.turn_duration",
+                    duration_seconds=max(0.0, now - self._last_turn_start_time),
+                )
+            self._last_turn_end_time = now
         
         elif event_type_str == "tool.execution_start":
             # Log tool execution start - try multiple attribute names
@@ -541,6 +589,9 @@ For each task, provide clear requirements and acceptance criteria."""
                 getattr(event_data, "name", None) or
                 ""
             ) if event_data else ""
+            tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
+            if tool_call_id:
+                self._tool_start_times[tool_call_id] = time.monotonic()
             logger.info(f"  → Running: {tool_name}")
         
         elif event_type_str == "tool.execution_complete":
@@ -552,6 +603,13 @@ For each task, provide clear requirements and acceptance criteria."""
                 getattr(event_data, "name", None) or
                 ""
             ) if event_data else ""
+            if tool_call_id in self._tool_start_times and self.perf_logger.enabled:
+                start = self._tool_start_times.pop(tool_call_id)
+                self.perf_logger.log(
+                    "sdk.tool_duration",
+                    tool=tool_name or tool_call_id,
+                    duration_seconds=max(0.0, time.monotonic() - start),
+                )
             logger.info(f"  ✓ Completed: {tool_name or tool_call_id}")
         
         elif event_type_str == "session.error":
@@ -566,6 +624,8 @@ For each task, provide clear requirements and acceptance criteria."""
     async def _cleanup(self):
         """Clean up resources using SDK best practices with timeout protection."""
         logger.info("Starting agent cleanup...")
+        if self._perf_task:
+            self._perf_task.cancel()
         # Destroy session (not close - SDK best practice)
         if self.session:
             try:
@@ -615,6 +675,35 @@ For each task, provide clear requirements and acceptance criteria."""
                 logger.info(f"  - {task['id']}: {task['title']}")
         
         logger.info("=" * 60)
+
+    def _start_perf_sampler(self) -> None:
+        if not self.perf_logger.enabled or self._perf_task is not None:
+            return
+
+        interval = max(1, int(self.config.perf_sample_interval_seconds))
+
+        async def _sample_loop() -> None:
+            next_time = time.monotonic() + interval
+            while True:
+                await asyncio.sleep(interval)
+                now = time.monotonic()
+                lag = max(0.0, now - next_time)
+                next_time = now + interval
+                if self.config.enable_tracemalloc:
+                    current, peak = tracemalloc.get_traced_memory()
+                    self.perf_logger.log(
+                        "memory.sample",
+                        current_bytes=current,
+                        peak_bytes=peak,
+                        loop_lag_seconds=lag,
+                    )
+                else:
+                    self.perf_logger.log(
+                        "loop.sample",
+                        loop_lag_seconds=lag,
+                    )
+
+        self._perf_task = asyncio.create_task(_sample_loop())
 
 
 class MockEventData:

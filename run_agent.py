@@ -169,6 +169,29 @@ Examples:
         type=Path,
         help="Log file path (in addition to stdout)"
     )
+
+    # Performance/benchmarking
+    parser.add_argument(
+        "--perf-log",
+        type=Path,
+        help="Path to JSONL performance log file"
+    )
+    parser.add_argument(
+        "--perf-sample-interval",
+        type=int,
+        default=30,
+        help="Seconds between perf samples (default: 30)"
+    )
+    parser.add_argument(
+        "--tracemalloc",
+        action="store_true",
+        help="Enable tracemalloc memory tracking"
+    )
+    parser.add_argument(
+        "--profile",
+        type=Path,
+        help="Write cProfile stats to the given file"
+    )
     
     # Copilot SDK settings
     parser.add_argument(
@@ -368,6 +391,9 @@ async def run_planner(args: argparse.Namespace):
         cli_url=args.cli_url,
         planner_mode=True,
         enable_self_improvement=args.enable_self_improvement,
+        perf_log_path=args.perf_log,
+        perf_sample_interval_seconds=args.perf_sample_interval,
+        enable_tracemalloc=args.tracemalloc,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -383,7 +409,15 @@ async def run_planner(args: argparse.Namespace):
     
     # Create and start the agent in planner mode
     agent = AutonomousAgent(config)
-    await agent.start()
+    if args.profile:
+        import cProfile
+        profiler = cProfile.Profile()
+        profiler.enable()
+        await agent.start()
+        profiler.disable()
+        profiler.dump_stats(args.profile)
+    else:
+        await agent.start()
 
 
 async def run_single_agent(args: argparse.Namespace):
@@ -401,6 +435,9 @@ async def run_single_agent(args: argparse.Namespace):
         log_file=args.log_file,
         cli_url=args.cli_url,
         enable_self_improvement=args.enable_self_improvement,
+        perf_log_path=args.perf_log,
+        perf_sample_interval_seconds=args.perf_sample_interval,
+        enable_tracemalloc=args.tracemalloc,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -417,7 +454,15 @@ async def run_single_agent(args: argparse.Namespace):
     
     # Create and start the agent
     agent = AutonomousAgent(config)
-    await agent.start()
+    if args.profile:
+        import cProfile
+        profiler = cProfile.Profile()
+        profiler.enable()
+        await agent.start()
+        profiler.disable()
+        profiler.dump_stats(args.profile)
+    else:
+        await agent.start()
 
 
 async def run_hive_mind(args: argparse.Namespace):
@@ -442,6 +487,9 @@ async def run_hive_mind(args: argparse.Namespace):
         log_file=args.log_file,
         cli_url=args.cli_url,
         enable_self_improvement=args.enable_self_improvement,
+        perf_log_path=args.perf_log,
+        perf_sample_interval_seconds=args.perf_sample_interval,
+        enable_tracemalloc=args.tracemalloc,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -460,7 +508,15 @@ async def run_hive_mind(args: argparse.Namespace):
     
     # Create and start the orchestrator
     orchestrator = MultiAgentOrchestrator(config)
-    await orchestrator.start()
+    if args.profile:
+        import cProfile
+        profiler = cProfile.Profile()
+        profiler.enable()
+        await orchestrator.start()
+        profiler.disable()
+        profiler.dump_stats(args.profile)
+    else:
+        await orchestrator.start()
 
 
 async def main():

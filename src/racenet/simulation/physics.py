@@ -113,11 +113,73 @@ class PhysicsEngine:
             New velocity
         """
         new_vel = velocity + acceleration * dt
-        # Apply linear damping - simplified uniform energy dissipation model
-        # Applied uniformly rather than direction-dependent for simplicity.
-        # Represents combined effects of rolling resistance and minor losses.
-        new_vel *= (1.0 - self.config.linear_damping)
+        # Apply linear damping scaled by timestep for stability across dt values.
+        damping = np.exp(-self.config.linear_damping * dt)
+        new_vel *= damping
         return new_vel
+
+    def integrate_rigid_body_rk4(
+        self,
+        position: np.ndarray,
+        velocity: np.ndarray,
+        heading: float,
+        yaw_rate: float,
+        body_accel: np.ndarray,
+        yaw_accel: float,
+        dt: float,
+    ) -> tuple[np.ndarray, np.ndarray, float, float]:
+        """Integrate planar rigid body state using RK4.
+
+        Args:
+            position: Current position [x, y] in world frame
+            velocity: Current velocity [vx, vy] in world frame
+            heading: Current heading in radians
+            yaw_rate: Current yaw rate in rad/s
+            body_accel: Acceleration in body frame [ax, ay]
+            yaw_accel: Yaw acceleration in rad/s^2
+            dt: Time step in seconds
+
+        Returns:
+            Tuple of (position, velocity, heading, yaw_rate)
+        """
+        if dt <= 1e-9:
+            return position, velocity, heading, yaw_rate
+
+        state = np.array([
+            position[0],
+            position[1],
+            velocity[0],
+            velocity[1],
+            heading,
+            yaw_rate,
+        ], dtype=float)
+
+        def derivatives(state_vec: np.ndarray) -> np.ndarray:
+            vx, vy = state_vec[2], state_vec[3]
+            heading_local = state_vec[4]
+            yaw_rate_local = state_vec[5]
+            accel_world = self.local_to_world(body_accel, heading_local)
+            return np.array([
+                vx,
+                vy,
+                accel_world[0],
+                accel_world[1],
+                yaw_rate_local,
+                yaw_accel,
+            ], dtype=float)
+
+        k1 = derivatives(state)
+        k2 = derivatives(state + 0.5 * dt * k1)
+        k3 = derivatives(state + 0.5 * dt * k2)
+        k4 = derivatives(state + dt * k3)
+        new_state = state + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+        return (
+            np.array([new_state[0], new_state[1]]),
+            np.array([new_state[2], new_state[3]]),
+            float(new_state[4]),
+            float(new_state[5]),
+        )
     
     def rotate_vector_2d(
         self,

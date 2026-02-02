@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Dict, Any
 import numpy as np
 
+from racenet.simulation.physics import PhysicsEngine
 from racenet.car.engine import Engine, EngineConfig
 from racenet.car.transmission import Transmission, TransmissionConfig, GearState
 from racenet.car.aero import Aero, AeroConfig
@@ -122,6 +123,7 @@ class Car:
         self.chassis = Chassis(self.config.chassis)
         self.electronics = Electronics(self.config.electronics)
         self.tires = TireSet(self.config.tires)
+        self.physics = PhysicsEngine()
         
         # Car state
         self.state = CarState()
@@ -176,6 +178,11 @@ class Car:
     def heading(self) -> float:
         """Current heading in radians."""
         return self.state.heading
+
+    def _get_body_velocity(self) -> np.ndarray:
+        """Get current velocity in body frame."""
+        world_velocity = np.array([self.state.velocity_x, self.state.velocity_y])
+        return self.physics.world_to_local(world_velocity, self.state.heading)
     
     def _calculate_wheel_speeds(self) -> tuple[float, float, float, float]:
         """Calculate wheel rotational speeds.
@@ -183,8 +190,8 @@ class Car:
         Returns:
             Tuple of wheel speeds (rad/s) [FL, FR, RL, RR]
         """
-        # Get speed along car's direction
-        speed = self.state.speed
+        # Get longitudinal speed along car's direction
+        speed = self._get_body_velocity()[0]
         
         # Calculate yaw rate effect on wheel speeds
         yaw_rate = self.state.yaw_rate
@@ -252,54 +259,69 @@ class Car:
             np.clip(rr_slip, -0.5, 0.5),
         )
     
-    def _calculate_slip_angles(self, steering: float) -> tuple[float, float, float, float]:
-        """Calculate tire slip angles.
-        
+    def _calculate_slip_angles(
+        self,
+        steering: float,
+        body_velocity: np.ndarray,
+        yaw_rate: float,
+    ) -> tuple[float, float, float, float]:
+        """Calculate tire slip angles using local wheel velocities.
+
         Args:
             steering: Steering input (-1 to 1)
-            
+            body_velocity: Velocity in body frame [vx, vy]
+            yaw_rate: Yaw rate in rad/s
+
         Returns:
             Tuple of slip angles in degrees [FL, FR, RL, RR]
         """
-        # Max steering angle (degrees) 
-        max_steer = 25.0
-        steer_angle = steering * max_steer
-        
-        # Calculate slip angles from steering and vehicle motion
-        speed = max(self.state.speed, 0.5)
-        yaw_rate = self.state.yaw_rate
+        max_steer_rad = np.radians(25.0)
+        steer_angle = -steering * max_steer_rad
+        wheel_positions = self._get_wheel_positions_body()
+
+        slip_angles: list[float] = []
+        min_speed = 0.5
+        vx_body, vy_body = body_velocity
+
+        for i, pos in enumerate(wheel_positions):
+            wheel_vx = vx_body - yaw_rate * pos[1]
+            wheel_vy = vy_body + yaw_rate * pos[0]
+            if abs(wheel_vx) < min_speed:
+                wheel_vx = min_speed if wheel_vx >= 0 else -min_speed
+            slip_angle = np.arctan2(wheel_vy, wheel_vx)
+            if i in (0, 1):
+                slip_angle -= steer_angle
+            slip_angles.append(float(np.clip(np.degrees(slip_angle), -20.0, 20.0)))
+
+        return tuple(slip_angles)
+
+    def _get_wheel_positions_body(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Get wheel positions in body frame relative to CG."""
         wheelbase = self.suspension.config.wheelbase_m
-        
-        # Simplified bicycle model slip angles
-        # Front: steering angle - atan(yaw_rate * front_dist / speed)
-        # Rear: -atan(yaw_rate * rear_dist / speed)
-        
-        front_dist = wheelbase * (1 - self.chassis.front_weight_fraction)
-        rear_dist = wheelbase * self.chassis.front_weight_fraction
-        
-        alpha_f = steer_angle - np.degrees(np.arctan(yaw_rate * front_dist / speed))
-        alpha_r = -np.degrees(np.arctan(yaw_rate * rear_dist / speed))
-        
-        # Small difference between left/right due to yaw
-        yaw_effect = np.degrees(yaw_rate * 0.1)
-        
+        front_dist = self.chassis.cog_from_front
+        rear_dist = wheelbase - front_dist
         return (
-            np.clip(alpha_f - yaw_effect, -20, 20),
-            np.clip(alpha_f + yaw_effect, -20, 20),
-            np.clip(alpha_r - yaw_effect, -20, 20),
-            np.clip(alpha_r + yaw_effect, -20, 20),
+            np.array([front_dist, self.suspension.config.front_track_m / 2]),
+            np.array([front_dist, -self.suspension.config.front_track_m / 2]),
+            np.array([-rear_dist, self.suspension.config.rear_track_m / 2]),
+            np.array([-rear_dist, -self.suspension.config.rear_track_m / 2]),
         )
-    
-    def step(self, inputs: CarInputs, dt: float) -> CarState:
-        """Advance car simulation by one time step.
-        
-        Args:
-            inputs: Driver control inputs
-            dt: Time step in seconds
-            
-        Returns:
-            Updated car state
-        """
+
+    def _transform_front_wheel_forces(
+        self,
+        fx: float,
+        fy: float,
+        steer_angle_rad: float,
+    ) -> tuple[float, float]:
+        """Transform front wheel forces from wheel to body frame."""
+        cos_s = np.cos(steer_angle_rad)
+        sin_s = np.sin(steer_angle_rad)
+        body_fx = fx * cos_s - fy * sin_s
+        body_fy = fx * sin_s + fy * cos_s
+        return body_fx, body_fy
+
+    def _step_internal(self, inputs: CarInputs, dt: float) -> CarState:
+        """Advance car simulation by one time step."""
         # Clamp inputs
         throttle = np.clip(inputs.throttle, 0.0, 1.0)
         brake = np.clip(inputs.brake, 0.0, 1.0)
@@ -330,7 +352,7 @@ class Car:
             self.engine.throttle = max(self.engine.throttle, shift_info["rev_match_request"])
         
         # Calculate wheel RPM for engine update
-        wheel_speed_rad = self.state.speed / self.tires.rl.radius
+        wheel_speed_rad = self._get_body_velocity()[0] / self.tires.rl.radius
         wheel_rpm = wheel_speed_rad * 60 / (2 * np.pi)
         
         # Update engine
@@ -361,7 +383,8 @@ class Car:
         slip_ratios = self._calculate_slip_ratios(
             wheel_speeds, drive_torque, brake_front, brake_rear
         )
-        slip_angles = self._calculate_slip_angles(steering)
+        body_velocity = self._get_body_velocity()
+        slip_angles = self._calculate_slip_angles(steering, body_velocity, self.state.yaw_rate)
         
         # Update tires and get forces
         tire_forces_x = []
@@ -377,71 +400,95 @@ class Car:
             )
             tire_forces_x.append(fx)
             tire_forces_y.append(fy)
-        
-        # Calculate total forces in car frame
-        total_fx = sum(tire_forces_x) - drag  # Subtract drag
-        total_fy = sum(tire_forces_y)
-        
-        # Calculate accelerations
+
+        # Accumulate forces in body frame at each wheel and moments about CG.
+        steer_angle_rad = -np.radians(steering * 25.0)
+        wheel_positions = self._get_wheel_positions_body()
+        total_force_body = np.zeros(2)
+        total_yaw_moment = 0.0
+
+        for i, (fx, fy, pos) in enumerate(zip(tire_forces_x, tire_forces_y, wheel_positions)):
+            if i in (0, 1):
+                fx_body, fy_body = self._transform_front_wheel_forces(
+                    fx, fy, steer_angle_rad
+                )
+            else:
+                fx_body, fy_body = fx, fy
+            total_force_body += np.array([fx_body, fy_body])
+            total_yaw_moment += pos[0] * fy_body - pos[1] * fx_body
+
+        # Aerodynamic drag acts opposite forward direction in body frame.
+        total_force_body[0] -= drag
+
         mass = self.chassis.total_mass
-        accel_x = total_fx / mass  # Forward acceleration
-        accel_y = total_fy / mass  # Lateral acceleration
-        
-        # Store g-forces for next frame
-        self.state.longitudinal_g = accel_x / 9.81
-        self.state.lateral_g = accel_y / 9.81
-        
-        # Calculate yaw moment from tire forces
-        wheelbase = self.suspension.config.wheelbase_m
-        front_track = self.suspension.config.front_track_m
-        rear_track = self.suspension.config.rear_track_m
-        
-        # Yaw moment from front and rear lateral forces
-        front_moment = (tire_forces_y[0] + tire_forces_y[1]) * self.chassis.cog_from_front
-        rear_moment = -(tire_forces_y[2] + tire_forces_y[3]) * (wheelbase - self.chassis.cog_from_front)
-        
-        # Additional moment from left/right force difference
-        front_diff_moment = (tire_forces_y[1] - tire_forces_y[0]) * front_track / 2
-        rear_diff_moment = (tire_forces_y[3] - tire_forces_y[2]) * rear_track / 2
-        
-        total_yaw_moment = front_moment + rear_moment + front_diff_moment + rear_diff_moment
-        
-        # Angular acceleration
+        body_accel = total_force_body / mass
+
+        self.state.longitudinal_g = body_accel[0] / 9.81
+        self.state.lateral_g = body_accel[1] / 9.81
+
         yaw_accel = total_yaw_moment / self.chassis.yaw_inertia
-        
-        # Update yaw rate with damping
-        self.state.yaw_rate += yaw_accel * dt
-        self.state.yaw_rate *= 0.98  # Damping
-        
-        # Update heading
-        self.state.heading += self.state.yaw_rate * dt
-        
-        # Keep heading in [-pi, pi]
-        while self.state.heading > np.pi:
-            self.state.heading -= 2 * np.pi
-        while self.state.heading < -np.pi:
-            self.state.heading += 2 * np.pi
-        
-        # Convert car-frame acceleration to world frame
-        cos_h = np.cos(self.state.heading)
-        sin_h = np.sin(self.state.heading)
-        
-        world_accel_x = accel_x * cos_h - accel_y * sin_h
-        world_accel_y = accel_x * sin_h + accel_y * cos_h
-        
-        # Update velocities
-        self.state.velocity_x += world_accel_x * dt
-        self.state.velocity_y += world_accel_y * dt
-        
-        # Update speed
-        self.state.speed = np.sqrt(
-            self.state.velocity_x**2 + self.state.velocity_y**2
+
+        position = np.array([self.state.x, self.state.y])
+        velocity = np.array([self.state.velocity_x, self.state.velocity_y])
+
+        position, velocity, heading, yaw_rate = self.physics.integrate_rigid_body_rk4(
+            position,
+            velocity,
+            self.state.heading,
+            self.state.yaw_rate,
+            body_accel,
+            yaw_accel,
+            dt,
         )
+
+        self.state.x = float(position[0])
+        self.state.y = float(position[1])
+        self.state.velocity_x = float(velocity[0])
+        self.state.velocity_y = float(velocity[1])
+        self.state.heading = float(heading)
+        self.state.yaw_rate = float(yaw_rate)
+
+        # Apply damping and normalize heading.
+        self.state.yaw_rate *= (1.0 - self.physics.config.angular_damping * dt)
+        if self.state.heading > np.pi or self.state.heading < -np.pi:
+            self.state.heading = (self.state.heading + np.pi) % (2 * np.pi) - np.pi
+
+        # Update speed from world velocity.
+        self.state.speed = float(np.hypot(self.state.velocity_x, self.state.velocity_y))
+
+        return self.state
+
+    def step(self, inputs: CarInputs, dt: float) -> CarState:
+        """Advance car simulation by one time step.
         
-        # Update position
-        self.state.x += self.state.velocity_x * dt
-        self.state.y += self.state.velocity_y * dt
-        
+        Args:
+            inputs: Driver control inputs
+            dt: Time step in seconds
+            
+        Returns:
+            Updated car state
+        """
+        if dt <= 1e-6:
+            return self.state
+
+        max_substep = 0.005
+        if dt <= max_substep:
+            return self._step_internal(inputs, dt)
+
+        num_steps = int(np.ceil(dt / max_substep))
+        sub_dt = dt / num_steps
+
+        for i in range(num_steps):
+            if i == 0:
+                sub_inputs = inputs
+            else:
+                sub_inputs = CarInputs(
+                    throttle=inputs.throttle,
+                    brake=inputs.brake,
+                    steering=inputs.steering,
+                )
+            self._step_internal(sub_inputs, sub_dt)
+
         return self.state
     
     def get_telemetry(self) -> Dict[str, Any]:

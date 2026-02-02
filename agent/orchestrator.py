@@ -11,6 +11,7 @@ import logging
 import random
 import signal
 import sys
+import tracemalloc
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -24,6 +25,7 @@ from agent.memory import (
     KnowledgeType,
     Importance,
 )
+from agent.perf import PerfLogger
 from agent.task_manager import TaskManager, Task, TaskStatus
 from agent.tools import ToolHandler, create_tool_definitions
 from agent.self_improvement import ActionOutcome, OutcomeType, SelfImprovementEngine
@@ -87,6 +89,11 @@ class OrchestratorConfig:
     # Logging
     log_level: str = "INFO"
     log_file: Optional[Path] = None
+
+    # Performance logging
+    perf_log_path: Optional[Path] = None
+    perf_sample_interval_seconds: int = 30
+    enable_tracemalloc: bool = False
     
     # Copilot SDK
     cli_url: Optional[str] = None
@@ -125,7 +132,12 @@ class AgentWorker:
             repo_root=config.repo_root,
             dry_run=config.dry_run,
             cli_url=config.cli_url,
+            perf_log_path=config.perf_log_path,
+            perf_sample_interval_seconds=config.perf_sample_interval_seconds,
+            enable_tracemalloc=config.enable_tracemalloc,
         )
+
+        self.perf_logger = PerfLogger(config.perf_log_path, agent_id=agent_id)
         
         self.tool_handler = ToolHandler(
             self.agent_config,
@@ -133,17 +145,27 @@ class AgentWorker:
             memory=memory,
             self_improvement=self_improvement,
             agent_id=agent_id,
+            perf_logger=self.perf_logger,
         )
         self._current_task: Optional[Task] = None
         self._running = False
         self._shutting_down = False
         self._response_content = ""
+        self._last_turn_end_time: float | None = None
+        self._last_turn_start_time: float | None = None
+        self._tool_start_times: dict[str, float] = {}
+        self._perf_task: asyncio.Task | None = None
         self._client = None
         self._session = None
     
     async def start(self):
         """Start the agent worker."""
         self._running = True
+
+        if self.config.enable_tracemalloc:
+            tracemalloc.start()
+            if self.perf_logger.enabled:
+                self.perf_logger.log("tracemalloc.start")
         
         # Register with memory
         self.memory.register_agent(self.agent_id)
@@ -152,6 +174,7 @@ class AgentWorker:
         logger.info(f"[{self.agent_id}] Starting (role: {self.role.value})")
         
         try:
+            self._start_perf_sampler()
             await self._run()
         except asyncio.CancelledError:
             logger.info(f"[{self.agent_id}] Cancelled")
@@ -420,47 +443,27 @@ class AgentWorker:
 
     def _get_system_message(self) -> str:
         """Get the system message with hive context."""
-        base_message = f"""You are Agent {self.agent_id}, part of a hive of autonomous development agents working on RaceNet.
+        base_message = f"""You are Agent {self.agent_id}, part of a hive working on RaceNet.
 
-## Your Role
-You are a {self.role.value} agent. {"Focus on tasks related to " + self.role.value if self.role != AgentRole.GENERALIST else "You can work on any type of task."}
+    Role: {self.role.value}. {"Focus on tasks related to " + self.role.value if self.role != AgentRole.GENERALIST else "You can work on any type of task."}
 
-## Hive Mind Coordination
-You are working with other agents. Use these practices:
+    Coordination:
+    - Query shared knowledge first.
+    - Acquire/release file locks before/after edits.
+    - Share useful findings and message peers when blocked.
 
-1. **Share Knowledge**: When you learn something useful, use share_knowledge to help other agents
-2. **Query First**: Before starting work, use query_knowledge to see what others have learned
-3. **Acquire Files**: Before editing a file, use acquire_file to prevent conflicts
-4. **Release Files**: After editing, use release_file so others can work on it
-5. **Communicate**: Use message_agents to coordinate with other agents
-6. **Check Status**: Use get_hive_status to see what others are working on
-
-## Current Hive Status
-"""
+    Current hive status:
+    """
         # Add current hive status
         summary = self.memory.get_summary()
         base_message += f"""
-- Active agents: {summary['active_agents']}
-- Total shared knowledge: {summary['total_knowledge']}
-- Agent IDs: {', '.join(summary['agent_ids'])}
+    - Active agents: {summary['active_agents']}
+    - Total shared knowledge: {summary['total_knowledge']}
+    - Agent IDs: {', '.join(summary['agent_ids'])}
 
-## Project Context
-RaceNet is a GT3-style racing simulation for ML. Key areas:
-- Physics (engine, tires, aero, suspension)
-- Track generation (procedural, realistic)
-- Telemetry (data recording, export)
-- ML (Gymnasium environment, training)
-
-## Workflow
-1. Query knowledge about your assigned task
-2. Acquire locks on files you'll edit
-3. Make changes, test frequently
-4. Share what you learned
-5. Release file locks
-6. Commit changes
-
-Be a good team player. Share knowledge, avoid conflicts, and help the hive succeed!
-"""
+    Workflow:
+    1) Read -> 2) Edit -> 3) Test -> 4) Share knowledge -> 5) Release locks -> 6) Commit.
+    """
         return base_message
     
     async def _get_next_task(self) -> Optional[Task]:
@@ -531,37 +534,23 @@ Be a good team player. Share knowledge, avoid conflicts, and help the hive succe
         
         # Get context from knowledge base
         context = self.memory.get_context_for_task(task.id, task.files_to_modify)
+        context = self._truncate(context) if context else "None"
+        description = self._truncate(task.description)
+        requirements = self._truncate(", ".join(task.requirements)) if task.requirements else "None"
+        acceptance = self._truncate(", ".join(t for _, t in task.acceptance_criteria)) if task.acceptance_criteria else "None"
         
         # Create prompt
-        prompt = f"""You are assigned to Task {task.id}: {task.title}
+        prompt = f"""Task {task.id}: {task.title}
 
-## Shared Knowledge Context
-{context if context else "No previous knowledge about this task."}
+    Shared knowledge: {context}
+    Priority: {task.priority.name} | Difficulty: {task.difficulty.value}
+    Description: {description}
+    Requirements: {requirements}
+    Acceptance: {acceptance}
+    Files: {', '.join(task.files_to_modify) if task.files_to_modify else 'Not specified'}
 
-## Task Details
-**Priority**: {task.priority.name}
-**Difficulty**: {task.difficulty.value}
-
-**Description**: {task.description}
-
-**Requirements**:
-{chr(10).join(f'- {r}' for r in task.requirements)}
-
-**Acceptance Criteria**:
-{chr(10).join(f'- [{"x" if c else " "}] {t}' for c, t in task.acceptance_criteria)}
-
-**Files to modify**: {', '.join(task.files_to_modify)}
-
-## Instructions
-1. First, query_knowledge for any relevant information
-2. acquire_file for each file you need to edit
-3. Make your changes
-4. Run tests to verify
-5. share_knowledge about what you learned
-6. release_file for each file you edited
-7. Commit your changes
-
-Start by exploring what you need to do."""
+    Instructions: query_knowledge, acquire locks, implement, test, share, release locks, commit.
+    """
 
         try:
             await self._send_message(prompt)
@@ -625,6 +614,12 @@ Start by exploring what you need to do."""
         finally:
             self._current_task = None
             self.memory.update_agent_state(self.agent_id, current_task="")
+
+    def _truncate(self, text: str) -> str:
+        max_chars = max(256, int(self.agent_config.prompt_max_chars))
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars - 3] + "..."
     
     async def _send_message(self, content: str):
         """Send a message to Copilot using SDK best practices."""
@@ -648,10 +643,18 @@ Start by exploring what you need to do."""
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
             timeout = self.agent_config.request_timeout
+            start = asyncio.get_event_loop().time()
             response = await self._session.send_and_wait(
                 {"prompt": content},
                 timeout=timeout
             )
+
+            if self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.send_and_wait",
+                    duration_seconds=max(0.0, asyncio.get_event_loop().time() - start),
+                    timeout_seconds=timeout,
+                )
             
             print()  # Newline after response
             
@@ -699,10 +702,27 @@ Start by exploring what you need to do."""
             if content:
                 print(f"[{self.agent_id}] {content}", end="", flush=True)
                 self._response_content += content
+                max_chars = self.agent_config.max_response_chars
+                if len(self._response_content) > max_chars:
+                    self._response_content = self._response_content[-max_chars:]
         elif event_type_str == "assistant.turn_start":
             logger.info(f"[{self.agent_id}] Assistant turn started")
+            now = asyncio.get_event_loop().time()
+            if self._last_turn_end_time is not None and self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.turn_gap",
+                    gap_seconds=max(0.0, now - self._last_turn_end_time),
+                )
+            self._last_turn_start_time = now
         elif event_type_str == "assistant.turn_end":
             logger.info(f"[{self.agent_id}] Assistant turn ended")
+            now = asyncio.get_event_loop().time()
+            if self._last_turn_start_time is not None and self.perf_logger.enabled:
+                self.perf_logger.log(
+                    "sdk.turn_duration",
+                    duration_seconds=max(0.0, now - self._last_turn_start_time),
+                )
+            self._last_turn_end_time = now
         
         elif event_type_str == "tool.execution_start":
             tool_name = (
@@ -711,6 +731,9 @@ Start by exploring what you need to do."""
                 getattr(event_data, "name", None) or
                 ""
             ) if event_data else ""
+            tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
+            if tool_call_id:
+                self._tool_start_times[tool_call_id] = asyncio.get_event_loop().time()
             logger.info(f"[{self.agent_id}]   → Running: {tool_name}")
         
         elif event_type_str == "tool.execution_complete":
@@ -721,6 +744,13 @@ Start by exploring what you need to do."""
                 getattr(event_data, "name", None) or
                 ""
             ) if event_data else ""
+            if tool_call_id in self._tool_start_times and self.perf_logger.enabled:
+                start = self._tool_start_times.pop(tool_call_id)
+                self.perf_logger.log(
+                    "sdk.tool_duration",
+                    tool=tool_name or tool_call_id,
+                    duration_seconds=max(0.0, asyncio.get_event_loop().time() - start),
+                )
             logger.info(f"[{self.agent_id}]   ✓ Completed: {tool_name or tool_call_id}")
         
         elif event_type_str == "session.error":
@@ -748,7 +778,7 @@ Start by exploring what you need to do."""
             return self._mark_useful(params)
         
         # Standard tools
-        return self.tool_handler.handle_tool_call(name, params)
+        return await asyncio.to_thread(self.tool_handler.handle_tool_call, name, params)
     
     def _share_knowledge(self, params: dict) -> str:
         """Share knowledge with the hive."""
@@ -880,6 +910,8 @@ Start by exploring what you need to do."""
     async def _cleanup(self):
         """Clean up resources using SDK best practices."""
         logger.info(f"[{self.agent_id}] Cleaning up worker resources...")
+        if self._perf_task:
+            self._perf_task.cancel()
         # Release any held file locks
         locks = self.memory.get_locked_files()
         for file_path, holder in locks.items():
@@ -916,6 +948,35 @@ Start by exploring what you need to do."""
                 logger.warning(f"[{self.agent_id}] Client stop timed out")
             except Exception as e:
                 logger.warning(f"[{self.agent_id}] Error stopping client: {e}")
+
+    def _start_perf_sampler(self) -> None:
+        if not self.perf_logger.enabled or self._perf_task is not None:
+            return
+
+        interval = max(1, int(self.config.perf_sample_interval_seconds))
+
+        async def _sample_loop() -> None:
+            next_time = asyncio.get_event_loop().time() + interval
+            while True:
+                await asyncio.sleep(interval)
+                now = asyncio.get_event_loop().time()
+                lag = max(0.0, now - next_time)
+                next_time = now + interval
+                if self.config.enable_tracemalloc:
+                    current, peak = tracemalloc.get_traced_memory()
+                    self.perf_logger.log(
+                        "memory.sample",
+                        current_bytes=current,
+                        peak_bytes=peak,
+                        loop_lag_seconds=lag,
+                    )
+                else:
+                    self.perf_logger.log(
+                        "loop.sample",
+                        loop_lag_seconds=lag,
+                    )
+
+        self._perf_task = asyncio.create_task(_sample_loop())
 
 
 class MultiAgentOrchestrator:

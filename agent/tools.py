@@ -4,6 +4,7 @@ Custom Tools for Copilot
 Tools that give the Copilot agent the ability to interact with the repository.
 """
 
+import asyncio
 import json
 import os
 import random
@@ -15,6 +16,7 @@ from typing import Any, Callable, Optional
 
 from agent.config import AgentConfig
 from agent.memory import KnowledgeEntry, KnowledgeType, Importance, RepositoryMemory
+from agent.perf import PerfLogger
 from agent.self_improvement import ActionOutcome, OutcomeType, SelfImprovementEngine
 from agent.task_manager import TaskManager
 
@@ -32,7 +34,11 @@ def _build_tool_handler(tool_handler: "ToolHandler") -> Callable[[ToolInvocation
     async def handler(invocation: ToolInvocation) -> ToolResult:
         try:
             arguments = invocation.get("arguments") or {}
-            result = tool_handler.handle_tool_call(invocation.get("tool_name", ""), arguments)
+            result = await asyncio.to_thread(
+                tool_handler.handle_tool_call,
+                invocation.get("tool_name", ""),
+                arguments,
+            )
             return {
                 "textResultForLlm": result,
                 "resultType": "success",
@@ -678,13 +684,41 @@ class ToolHandler:
         memory: RepositoryMemory | None = None,
         self_improvement: SelfImprovementEngine | None = None,
         agent_id: str = "agent",
+        perf_logger: PerfLogger | None = None,
     ):
         self.config = config
         self.task_manager = task_manager
         self.memory = memory
         self.self_improvement = self_improvement
         self.agent_id = agent_id
+        self.perf_logger = perf_logger
         self._proposed_tasks: list[dict] = []
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache_ttl_seconds = max(0, self.config.tool_cache_ttl_seconds)
+
+    def _cache_get(self, key: str) -> Any | None:
+        if not self._cache_ttl_seconds:
+            return None
+        cached = self._cache.get(key)
+        if not cached:
+            return None
+        timestamp, value = cached
+        if (time.monotonic() - timestamp) > self._cache_ttl_seconds:
+            self._cache.pop(key, None)
+            return None
+        return value
+
+    def _cache_set(self, key: str, value: Any) -> None:
+        if not self._cache_ttl_seconds:
+            return
+        self._cache[key] = (time.monotonic(), value)
+
+    def _cache_key(self, tool_name: str, params: dict[str, Any]) -> str:
+        try:
+            params_key = json.dumps(params, sort_keys=True)
+        except TypeError:
+            params_key = str(params)
+        return f"{tool_name}:{params_key}"
     
     def handle_tool_call(self, name: str, parameters: dict[str, Any]) -> str:
         """Execute a tool and return the result."""
@@ -736,12 +770,14 @@ class ToolHandler:
         error_message = ""
         result: Any = None
 
+        cached = False
         try:
             result = handler(parameters)
             if isinstance(result, dict) and "error" in result:
                 outcome = OutcomeType.FAILURE
                 error_message = str(result.get("error", ""))
                 self._record_error_knowledge(name, error_message, parameters)
+            cached = isinstance(result, dict) and bool(result.get("cached"))
             return json.dumps(result) if isinstance(result, (dict, list)) else str(result)
         except Exception as e:
             outcome = OutcomeType.ERROR
@@ -750,6 +786,15 @@ class ToolHandler:
             return json.dumps({"error": str(e)})
         finally:
             self._record_tool_outcome(name, outcome, start, error_message, parameters)
+            if self.perf_logger and self.perf_logger.enabled:
+                duration = max(0.0, time.monotonic() - start)
+                self.perf_logger.log(
+                    "tool",
+                    tool=name,
+                    duration_seconds=duration,
+                    outcome=outcome.value,
+                    cached=cached,
+                )
 
     def _record_tool_outcome(
         self,
@@ -818,6 +863,13 @@ class ToolHandler:
         start_line = params.get("start_line")
         end_line = params.get("end_line")
 
+        cache_key = self._cache_key("read_file", params)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            cached_result = dict(cached)
+            cached_result["cached"] = True
+            return cached_result
+
         try:
             content = path.read_text()
             total_size = len(content)
@@ -829,7 +881,7 @@ class ToolHandler:
                 end = min(total_lines, int(end_line) if end_line is not None else total_lines)
                 sliced = "\n".join(lines[start - 1:end])
                 truncated = start > 1 or end < total_lines
-                return {
+                result = {
                     "path": params["path"],
                     "content": sliced,
                     "size": len(sliced),
@@ -839,19 +891,25 @@ class ToolHandler:
                     "total_lines": total_lines,
                     "truncated": truncated,
                 }
+                self._cache_set(cache_key, result)
+                return result
 
             if max_chars:
                 max_chars = int(max_chars)
                 if total_size > max_chars:
-                    return {
+                    result = {
                         "path": params["path"],
                         "content": content[:max_chars],
                         "size": max_chars,
                         "total_size": total_size,
                         "truncated": True,
                     }
+                    self._cache_set(cache_key, result)
+                    return result
 
-            return {"path": params["path"], "content": content, "size": total_size}
+            result = {"path": params["path"], "content": content, "size": total_size}
+            self._cache_set(cache_key, result)
+            return result
         except Exception as e:
             return {"error": f"Failed to read file: {e}"}
     
@@ -876,6 +934,13 @@ class ToolHandler:
         dir_path = params.get("path", ".")
         recursive = params.get("recursive", False)
         max_items = int(params.get("max_items", self.config.list_directory_max_items))
+
+        cache_key = self._cache_key("list_directory", params)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            cached_result = dict(cached)
+            cached_result["cached"] = True
+            return cached_result
         
         path = self.config.repo_root / dir_path
         if not path.exists():
@@ -908,13 +973,15 @@ class ToolHandler:
                     truncated = True
                     break
         
-        return {
+        result = {
             "directory": dir_path,
             "items": items,
             "truncated": truncated,
             "returned": len(items),
             "max_items": max_items,
         }
+        self._cache_set(cache_key, result)
+        return result
     
     def _run_command(self, params: dict) -> dict:
         """Run a shell command."""
@@ -1093,6 +1160,13 @@ class ToolHandler:
         pattern = params["pattern"]
         file_pattern = params.get("file_pattern", "*")
         max_matches = int(params.get("max_matches", self.config.search_code_max_matches))
+
+        cache_key = self._cache_key("search_code", params)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            cached_result = dict(cached)
+            cached_result["cached"] = True
+            return cached_result
         
         try:
             cmd = ["grep", "-rn", "--include", file_pattern, pattern, str(self.config.repo_root)]
@@ -1108,7 +1182,9 @@ class ToolHandler:
                 if line:
                     matches.append(line)
 
-            return {"pattern": pattern, "matches": matches[:max_matches], "max_matches": max_matches}
+            result = {"pattern": pattern, "matches": matches[:max_matches], "max_matches": max_matches}
+            self._cache_set(cache_key, result)
+            return result
         except Exception as e:
             return {"error": f"Search failed: {e}"}
     
