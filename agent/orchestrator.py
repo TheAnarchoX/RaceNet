@@ -155,19 +155,27 @@ class AgentWorker:
     
     async def _run(self):
         """Main agent loop."""
-        # Try to import Copilot SDK
-        try:
-            from copilot import CopilotClient
-        except ImportError:
-            logger.warning(f"[{self.agent_id}] Copilot SDK not available, using mock")
-            from agent.autonomous_agent import MockCopilotClient as CopilotClient
+        # Determine whether to use mock client
+        use_mock = self.config.dry_run
         
-        # Initialize client
-        client_options = {}
-        if self.config.cli_url:
-            client_options["cli_url"] = self.config.cli_url
+        if not use_mock:
+            # Try to import Copilot SDK
+            try:
+                from copilot import CopilotClient
+            except ImportError:
+                logger.warning(f"[{self.agent_id}] Copilot SDK not available, using mock")
+                use_mock = True
         
-        self._client = CopilotClient(**client_options)
+        if use_mock:
+            from agent.autonomous_agent import MockCopilotClient
+            self._client = MockCopilotClient()
+            logger.debug(f"[{self.agent_id}] Using mock client for dry-run mode")
+        else:
+            # Initialize real client
+            client_options = {}
+            if self.config.cli_url:
+                client_options["cli_url"] = self.config.cli_url
+            self._client = CopilotClient(**client_options)
         
         # Start client explicitly (SDK best practice)
         try:
@@ -201,8 +209,17 @@ class AgentWorker:
         
         self.memory.update_agent_state(self.agent_id, status="idle")
         
+        # Calculate per-worker iteration limit
+        max_iterations_per_worker = max(
+            1, 
+            self.config.max_total_iterations // self.config.num_agents
+        )
+        iterations = 0
+        
         # Main loop
-        while self._running and not self._shutting_down:
+        while self._running and not self._shutting_down and iterations < max_iterations_per_worker:
+            iterations += 1
+            
             # Check for messages from other agents
             await self._process_messages()
             
@@ -218,6 +235,8 @@ class AgentWorker:
             
             # Heartbeat
             self.memory.update_agent_state(self.agent_id, status="idle")
+        
+        logger.info(f"[{self.agent_id}] Completed {iterations} iterations")
     
     def _build_hive_tool_handler(self) -> Callable[[ToolInvocation], ToolResult]:
         async def handler(invocation: ToolInvocation) -> ToolResult:

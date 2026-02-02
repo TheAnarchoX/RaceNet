@@ -125,9 +125,13 @@ class AutonomousAgent:
         logger.info(f"Dry run: {self.config.dry_run}")
         logger.info("=" * 60)
         
-        if not HAS_COPILOT_SDK:
-            logger.error("Copilot SDK not installed. Install with: pip install copilot-sdk")
-            return
+        # Determine whether to use mock client
+        use_mock = self.config.dry_run or not HAS_COPILOT_SDK
+        if use_mock:
+            if self.config.dry_run:
+                logger.info("Using mock client for dry-run mode")
+            else:
+                logger.warning("Copilot SDK not installed - using mock client")
         
         try:
             await self._run()
@@ -144,12 +148,19 @@ class AutonomousAgent:
     
     async def _run(self):
         """Main agent loop."""
-        # Initialize Copilot client
-        client_options = {}
-        if self.config.cli_url:
-            client_options["cli_url"] = self.config.cli_url
+        # Determine whether to use mock client
+        use_mock = self.config.dry_run or not HAS_COPILOT_SDK
         
-        self.client = CopilotClient(**client_options)
+        if use_mock:
+            # Use mock client for dry-run or when SDK not available
+            self.client = MockCopilotClient()
+            self.client.tool_handler = self.tool_handler
+        else:
+            # Use real Copilot client
+            client_options = {}
+            if self.config.cli_url:
+                client_options["cli_url"] = self.config.cli_url
+            self.client = CopilotClient(**client_options)
         
         # Start the client explicitly (best practice from SDK cookbook)
         await self.client.start()
@@ -168,6 +179,7 @@ class AutonomousAgent:
         
         # Register event handler using session.on() pattern
         self.session.on(self._handle_event)
+
         
         logger.info(f"Copilot session created: {self.session.session_id}")
         
@@ -354,6 +366,20 @@ For each task, provide clear requirements and acceptance criteria."""
         logger.info("=" * 60)
 
 
+class MockEventData:
+    """Mock event data for testing."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class MockSessionEvent:
+    """Mock session event matching SDK SessionEvent interface."""
+    def __init__(self, event_type: str, data: dict = None):
+        self.type = event_type  # Store as string directly
+        self.data = MockEventData(**(data or {}))
+
+
 class MockCopilotSession:
     """Mock session for testing without the actual SDK."""
     
@@ -373,10 +399,18 @@ class MockCopilotSession:
         prompt = options.get("prompt", "")
         self.messages.append({"role": "user", "content": prompt})
         
-        # Dispatch mock events to handlers
+        # Add a small delay to simulate real API latency
+        await asyncio.sleep(0.5)
+        
+        # Dispatch mock events to handlers (using proper mock event objects)
         for handler in self._event_handlers:
-            handler({"type": "assistant.message", "data": {"content": f"\n[Mock] Received: {prompt[:100]}...\n"}})
-            handler({"type": "session.idle", "data": {}})
+            # Simulate assistant message
+            handler(MockSessionEvent(
+                "assistant.message",
+                {"content": f"\n[Mock Mode] Received prompt: {prompt[:100]}...\n[Mock Mode] In dry-run mode, no actual changes will be made.\n"}
+            ))
+            # Simulate session idle
+            handler(MockSessionEvent("session.idle", {}))
         
         return None  # No final message in mock
     

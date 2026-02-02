@@ -1,205 +1,89 @@
-# RaceNet - GitHub Copilot Instructions
+# RaceNet - Copilot Instructions
 
-This document provides repository-specific guidance for GitHub Copilot when working with RaceNet.
+GT3-style racing simulation framework for ML experimentation. Physics-based car simulation + procedural tracks + Gymnasium-compatible RL environment.
 
-## Project Overview
+## Commands
+```bash
+pip install -e ".[dev]"     # Dev install
+pip install -e ".[ml]"      # Add ML deps (gymnasium, stable-baselines3)
+pytest                       # Run tests (uses tests/ dir)
+black src/ tests/           # Format (88 char limit)
+ruff check src/             # Lint
+python run_agent.py         # Run autonomous dev agent
+```
 
-RaceNet is a GT3-style racing simulation framework designed for machine learning experimentation. It provides:
-- Realistic physics-based car simulation
-- Procedural track generation
-- Comprehensive telemetry systems
-- ML-ready interfaces (Gymnasium-compatible)
+## Architecture
 
-## Code Style & Conventions
+**Data Flow**: `Simulator` → `World` (manages `Car[]` + `Track`) → `PhysicsEngine` → per-step telemetry
 
-### Python Style
-- Follow PEP 8 with 88-character line limit (Black formatting)
-- Use type hints for all function signatures
-- Use dataclasses for configuration and state objects
-- Prefer NumPy for numerical operations
-
-### Naming Conventions
-- Classes: `PascalCase` (e.g., `TireModel`, `TrackGenerator`)
-- Functions/methods: `snake_case` (e.g., `calculate_grip`, `get_telemetry`)
-- Constants: `UPPER_SNAKE_CASE` (e.g., `MAX_STEERING_ANGLE`, `DEFAULT_TIMESTEP`)
-- Private methods: `_leading_underscore` (e.g., `_compute_forces`)
-- Type aliases: `PascalCase` ending with descriptive suffix (e.g., `ForceVector`, `GripCoefficient`)
-
-### File Organization
 ```
 src/racenet/
-├── car/           # Car components (engine, tires, suspension, etc.)
-├── track/         # Track generation and features
-├── simulation/    # Core simulation loop and physics
-├── telemetry/     # Data recording and export
-├── scoring/       # Lap timing and scoring systems
-└── ml/            # Machine learning integration
+├── car/         # Components: engine, tires, transmission, aero, suspension, chassis, electronics
+├── track/       # TrackGenerator creates Track from Segments with Kerbs/Features
+├── simulation/  # Simulator (main loop), World (state), PhysicsEngine
+├── telemetry/   # TelemetryRecorder with channel system (see STANDARD_CHANNELS in recorder.py)
+├── scoring/     # ScoringSystem combines LapTimer + DrivingStyleScorer for rewards
+└── ml/          # RaceEnv (Gymnasium), ObservationSpace, ActionSpace, multi-car population
 ```
 
-## Architecture Guidelines
+**Core Pattern**: Config dataclass → Component class with `update(dt)`, `reset()`, `get_telemetry()` methods.
 
-### Component Design
-- Each car component (engine, tires, etc.) should be a separate class
-- Components communicate through well-defined interfaces
-- Use configuration dataclasses for component parameters
-- State should be clearly separated from configuration
+## Key Conventions
 
-### Physics Implementation
-- Use SI units consistently (meters, seconds, kilograms, Newtons)
-- Store angles in radians internally, convert for display
-- Timestep should be configurable (default: 10ms)
-- Consider numerical stability for all calculations
+- **Units**: SI everywhere (m, s, kg, N, rad). Angles in radians internally, degrees for display
+- **Timestep**: 10ms default (`SimulatorConfig.fixed_dt = 0.01`)
+- **Config/State Separation**: Every component has `ComponentConfig` (immutable params) + `ComponentState` (mutable runtime)
+- **Type hints**: Required on all function signatures. Use `X | None` not `Optional[X]`
+- **Telemetry channels**: Use underscores like `speed_kph`, `tire_temp_fl` (see `STANDARD_CHANNELS` dict in `telemetry/recorder.py`)
 
-### Telemetry
-- All car state should be accessible through telemetry channels
-- Channel names use dot notation: `engine.rpm`, `tire.fl.temperature`
-- Export supports CSV, JSON, and NumPy formats
-- Recording frequency should be configurable
-
-## ML Integration Guidelines
-
-### Environment Design
-- Follow Gymnasium API conventions exactly
-- Observation space should use `Box` with normalized values [-1, 1] where possible
-- Action space should match realistic control inputs
-- Include useful metadata in `info` dict
-
-### Reward Design
-- Combine lap time and driving style metrics
-- Avoid sparse rewards (provide continuous feedback)
-- Normalize rewards to reasonable ranges
-- Document reward component weights
-
-## Testing Guidelines
-
-### Test Structure
+## Component Template
 ```python
-def test_component_specific_behavior():
-    """Test that [component] does [expected behavior]."""
-    # Arrange
-    component = Component(config)
-    
-    # Act
-    result = component.method(inputs)
-    
-    # Assert
-    assert result == expected
-```
-
-### What to Test
-- Unit tests for each component's core functionality
-- Integration tests for component interactions
-- Physics regression tests with known good values
-- Edge cases (zero inputs, maximum values, etc.)
-
-## Task Implementation
-
-When implementing tasks from `TASKS.md`:
-
-1. **Read the full task description** including requirements and acceptance criteria
-2. **Check dependencies** - ensure prerequisite tasks are complete
-3. **Create tests first** - write tests based on acceptance criteria
-4. **Implement incrementally** - make small, testable changes
-5. **Update telemetry** - ensure new state is accessible
-6. **Update documentation** - add docstrings and update README if needed
-
-## Common Patterns
-
-### Creating a New Car Component
-```python
-from dataclasses import dataclass, field
-from typing import Optional
-import numpy as np
-
 @dataclass
-class ComponentConfig:
-    """Configuration for the component."""
-    param1: float = 1.0
-    param2: float = 2.0
+class WidgetConfig:
+    param: float = 1.0
 
-@dataclass
-class ComponentState:
-    """Current state of the component."""
-    value1: float = 0.0
-    value2: float = 0.0
-
-class Component:
-    """Component description."""
+class Widget:
+    def __init__(self, config: WidgetConfig | None = None):
+        self.config = config or WidgetConfig()
+        self._state_value: float = 0.0
     
-    def __init__(self, config: Optional[ComponentConfig] = None):
-        self.config = config or ComponentConfig()
-        self.state = ComponentState()
-    
-    def update(self, dt: float, inputs: InputType) -> OutputType:
-        """Update component state for one timestep."""
-        # Implementation
+    def update(self, dt: float, inputs: ...) -> ...:
+        """Update for one timestep."""
         pass
     
     def reset(self) -> None:
-        """Reset component to initial state."""
-        self.state = ComponentState()
+        self._state_value = 0.0
     
     def get_telemetry(self) -> dict:
-        """Return current telemetry data."""
-        return {
-            "value1": self.state.value1,
-            "value2": self.state.value2,
-        }
+        return {"widget_value": self._state_value}
 ```
 
-### Adding Telemetry Channel
+## ML Environment Usage
 ```python
-# In the component class
-def get_telemetry(self) -> dict:
-    return {
-        "channel.name": self.state.value,
-        "channel.nested.name": self.state.nested_value,
-    }
-
-# In the telemetry recorder
-recorder.add_channels([
-    TelemetryChannel("channel.name", "unit", min_val, max_val),
-])
+from racenet.ml import RaceEnv
+env = RaceEnv()
+obs, info = env.reset()
+obs, reward, terminated, truncated, info = env.step(action)  # action: [throttle, brake, steering]
 ```
+- Observations normalized to [-1, 1] where possible
+- Reward weights in `ScoringConfig`: speed (0.3), progress (0.3), style (0.2), time (0.2)
 
-### Track Feature Implementation
+## Test Pattern
 ```python
-@dataclass
-class FeatureConfig:
-    """Configuration for track feature."""
-    intensity: float = 0.5
-    
-class Feature:
-    """Track feature that affects car behavior."""
-    
-    def get_effect(self, position: np.ndarray) -> FeatureEffect:
-        """Calculate effect at given position."""
-        pass
+class TestWidget:
+    def test_widget_does_expected_thing(self):
+        """Test that widget [expected behavior]."""
+        widget = Widget(WidgetConfig(param=2.0))
+        result = widget.update(0.01, inputs)
+        assert result == expected
 ```
 
-## Physics Reference
+## Task Implementation (from TASKS.md)
+1. Check task dependencies are complete
+2. Write tests from acceptance criteria first
+3. Add new state to component's `get_telemetry()` method
+4. Verify physics uses SI units and handles edge cases
 
-### GT3 Car Characteristics
-- Mass: ~1300 kg (with driver)
-- Power: ~500-550 hp
-- Downforce: ~1500 kg at 250 km/h
-- Maximum cornering: ~1.5-1.6g
-- 0-100 km/h: ~3.5 seconds
-- Top speed: ~280-300 km/h
-
-### Tire Behavior
-- Peak slip angle: ~8-10 degrees
-- Peak slip ratio: ~8-10%
-- Optimal temperature: ~85-100°C
-- Use Pacejka "Magic Formula" for accurate grip
-
-### Aerodynamics
-- Drag coefficient: ~0.35-0.40
-- Lift coefficient: ~-2.5 to -3.5 (downforce)
-- Balance shift with speed and DRS
-
-## Useful References
-
-- [TASKS.md](../TASKS.md) - Implementation tasks
-- [examples/](../examples/) - Usage examples
-- [tests/](../tests/) - Test patterns
+## Physics Reference (GT3 targets)
+- Cornering grip: ~1.5-1.6g | Peak slip: 8-10% longitudinal, 8° lateral
+- Tire temps: 85-100°C optimal | Use Pacejka "Magic Formula" for grip curves
