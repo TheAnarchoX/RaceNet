@@ -251,7 +251,11 @@ def print_banner(mode: str = "single"):
     print(banner)
 
 
-def check_prerequisites(repo_root: Path, tasks_file: str = "TASKS.md") -> bool:
+def check_prerequisites(
+    repo_root: Path,
+    tasks_file: str = "TASKS.md",
+    cli_url: str | None = None,
+) -> bool:
     """Check that prerequisites are met."""
     issues = []
     
@@ -264,17 +268,19 @@ def check_prerequisites(repo_root: Path, tasks_file: str = "TASKS.md") -> bool:
     if not tasks_path.exists():
         issues.append(f"Tasks file not found: {tasks_path}")
     
-    # Check for Copilot CLI
-    import shutil
-    if not shutil.which("copilot"):
-        issues.append("Copilot CLI not found. Install from: https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli")
-    
-    # Check for copilot-sdk (warning only)
-    try:
-        import copilot
-    except ImportError:
+    # Check for copilot-sdk and Copilot CLI (warn only, allow mock fallback)
+    import importlib.util
+
+    has_sdk = importlib.util.find_spec("copilot") is not None
+    if not has_sdk:
         print("⚠️  copilot-sdk not installed. Will run in mock mode.")
         print("   Install with: pip install github-copilot-sdk")
+
+    if has_sdk and not cli_url:
+        import shutil
+        if not shutil.which("copilot"):
+            print("⚠️  Copilot CLI not found. Will attempt mock fallback.")
+            print("   Install from: https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli")
     
     if issues:
         print("❌ Prerequisites check failed:")
@@ -361,6 +367,7 @@ async def run_planner(args: argparse.Namespace):
         log_file=args.log_file,
         cli_url=args.cli_url,
         planner_mode=True,
+        enable_self_improvement=args.enable_self_improvement,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -371,7 +378,7 @@ async def run_planner(args: argparse.Namespace):
     print()
     
     # Check prerequisites
-    if not check_prerequisites(config.repo_root):
+    if not check_prerequisites(config.repo_root, cli_url=config.cli_url):
         sys.exit(1)
     
     # Create and start the agent in planner mode
@@ -393,6 +400,7 @@ async def run_single_agent(args: argparse.Namespace):
         log_level=args.log_level,
         log_file=args.log_file,
         cli_url=args.cli_url,
+        enable_self_improvement=args.enable_self_improvement,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -404,7 +412,7 @@ async def run_single_agent(args: argparse.Namespace):
     print()
     
     # Check prerequisites
-    if not check_prerequisites(config.repo_root):
+    if not check_prerequisites(config.repo_root, cli_url=config.cli_url):
         sys.exit(1)
     
     # Create and start the agent
@@ -433,6 +441,7 @@ async def run_hive_mind(args: argparse.Namespace):
         log_level=args.log_level,
         log_file=args.log_file,
         cli_url=args.cli_url,
+        enable_self_improvement=args.enable_self_improvement,
     )
     
     print(f"📁 Repository: {config.repo_root}")
@@ -446,7 +455,7 @@ async def run_hive_mind(args: argparse.Namespace):
     print()
     
     # Check prerequisites
-    if not check_prerequisites(config.repo_root):
+    if not check_prerequisites(config.repo_root, cli_url=config.cli_url):
         sys.exit(1)
     
     # Create and start the orchestrator

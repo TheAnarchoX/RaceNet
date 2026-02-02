@@ -13,6 +13,8 @@ import time
 from typing import Any, Callable, Optional
 
 from agent.config import AgentConfig
+from agent.memory import RepositoryMemory
+from agent.self_improvement import ActionOutcome, OutcomeType, SelfImprovementEngine
 from agent.task_manager import TaskManager
 from agent.tools import ToolHandler, create_tool_definitions
 
@@ -27,49 +29,19 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_MESSAGE = """You are an autonomous development agent for RaceNet, a GT3-style racing simulation framework for machine learning.
+SYSTEM_MESSAGE = """You are an autonomous development agent for RaceNet, a GT3-style racing simulation framework.
 
-Your mission is to continuously improve and evolve the RaceNet project by:
-1. Working on tasks from TASKS.md
-2. Writing high-quality, well-tested code
-3. Following the project's coding conventions
-4. Proposing new tasks when you identify improvements
-5. Keeping the simulation realistic and ML-ready
+Mission:
+- Work tasks from TASKS.md, implement changes, run tests, and commit.
+- Follow project conventions (type hints, dataclasses, SI units, radians for angles).
+- Propose new tasks when needed.
 
-## Project Context
-RaceNet simulates GT3 racing cars with:
-- Realistic physics (engine, tires, aero, suspension)
-- Procedural track generation
-- Telemetry system for data export
-- ML environment (Gymnasium-compatible)
-- Scoring system for lap times and driving style
+Tooling guidance (performance):
+- Prefer provided tools (read_file, list_directory, search_code).
+- Avoid many small reads; request larger slices or line ranges.
+- Keep tool calls minimal and targeted.
 
-## Workflow
-1. First, get the next available task using get_next_task
-2. Read relevant files to understand the current implementation
-3. Make incremental changes, testing frequently
-4. When done, commit your changes
-5. If you discover improvements, propose new tasks
-6. Move on to the next task
-
-## Coding Guidelines
-- Use Python type hints for all functions
-- Follow PEP 8 with 88-char line limit (Black formatting)
-- Use dataclasses for config and state objects
-- Use SI units (meters, seconds, kilograms, Newtons)
-- Store angles in radians internally
-- Add docstrings to all public functions
-- Run tests after making changes
-
-## GT3 Reference Data
-- Mass: ~1300 kg (with driver)
-- Power: ~500-550 hp
-- Max cornering: ~1.5-1.6g
-- Peak tire slip angle: ~8-10 degrees
-- Peak slip ratio: ~8-10%
-- Optimal tire temp: ~85-100°C
-
-Be thorough, methodical, and write production-quality code.
+GT3 reference: 1300 kg, 500–550 hp, 1.5–1.6g cornering, 8–10° slip angle, 8–10% slip ratio, 85–100°C tire temp.
 """
 
 
@@ -155,7 +127,19 @@ class AutonomousAgent:
     def __init__(self, config: AgentConfig):
         self.config = config
         self.task_manager = TaskManager(config.tasks_path)
-        self.tool_handler = ToolHandler(config, self.task_manager)
+        self.memory = RepositoryMemory(config.repo_root) if config.enable_memory else None
+        self.self_improvement = (
+            SelfImprovementEngine(config.repo_root)
+            if config.enable_self_improvement
+            else None
+        )
+        self.tool_handler = ToolHandler(
+            config,
+            self.task_manager,
+            memory=self.memory,
+            self_improvement=self.self_improvement,
+            agent_id="single-agent",
+        )
         self.client = None
         self.session = None
         self._iteration = 0
@@ -191,6 +175,10 @@ class AutonomousAgent:
         logger.info(f"Repository: {self.config.repo_root}")
         logger.info(f"Dry run: {self.config.dry_run}")
         logger.info("=" * 60)
+
+        if self.memory:
+            self.memory.register_agent("single-agent")
+            self.memory.update_agent_state("single-agent", status="starting")
         
         # Determine whether to use mock client
         use_mock = self.config.dry_run or not HAS_COPILOT_SDK
@@ -234,11 +222,24 @@ class AutonomousAgent:
             self.client = CopilotClient(**client_options)
         
         # Start the client explicitly (best practice from SDK cookbook)
-        await self.client.start()
-        logger.info("Copilot client started")
+        try:
+            await self.client.start()
+            logger.info("Copilot client started")
+        except (FileNotFoundError, ConnectionError) as exc:
+            logger.warning(
+                "Copilot client unavailable (%s); falling back to mock client",
+                exc,
+            )
+            self.client = MockCopilotClient()
+            self.client.tool_handler = self.tool_handler
+            await self.client.start()
         
         # Create session with tools
-        tools = create_tool_definitions(self.config, self.tool_handler)
+        tools = create_tool_definitions(
+            self.config,
+            self.tool_handler,
+            include_memory_tools=self.config.enable_memory,
+        )
         
         # Use planner or task worker system message
         system_msg = PLANNER_SYSTEM_MESSAGE if self.config.planner_mode else SYSTEM_MESSAGE
@@ -349,32 +350,29 @@ Start by reading TASKS.md, then systematically explore the source code."""
         logger.info(f"Priority: {task.priority.name}, Difficulty: {task.difficulty.value}")
         
         # Create prompt for the task
-        prompt = f"""Please work on Task {task.id}: {task.title}
+        prompt = f"""Work on Task {task.id}: {task.title}
 
-Description: {task.description}
+    Description: {task.description}
+    Requirements: {', '.join(task.requirements) if task.requirements else 'None'}
+    Acceptance: {', '.join(t for _, t in task.acceptance_criteria) if task.acceptance_criteria else 'None'}
+    Files: {', '.join(task.files_to_modify) if task.files_to_modify else 'Not specified'}
+    Current state: {task.current_state}
 
-Requirements:
-{chr(10).join(f'- {r}' for r in task.requirements)}
+    Instructions:
+    - Read relevant files first (use minimal, targeted tool calls).
+    - Implement changes, run tests, commit.
+    - Do not wait for confirmation; implement immediately.
+    - When done, call mark_task_complete with task_id="{task.id}".
+    """
 
-Acceptance Criteria:
-{chr(10).join(f'- [{" x" if c else " "}] {t}' for c, t in task.acceptance_criteria)}
+        start_time = time.monotonic()
 
-Files to modify: {', '.join(task.files_to_modify)}
-
-Current state: {task.current_state}
-
-IMPORTANT: This is an autonomous agent session. Do NOT wait for manual confirmation.
-After creating any plan, immediately proceed with implementation.
-Do NOT ask me to say "start" - just implement directly.
-
-Please:
-1. First read the relevant files to understand the current implementation
-2. Make the necessary changes to fulfill the requirements
-3. Run tests to verify your changes work
-4. Commit your changes when done
-5. CRITICAL: When you've completed all requirements, use the mark_task_complete tool with task_id="{task.id}" to mark it done in TASKS.md
-
-Start by exploring the codebase and then implement the changes."""
+        if self.memory:
+            self.memory.update_agent_state(
+                "single-agent",
+                status="working",
+                current_task=task.id,
+            )
 
         # Send to Copilot and handle response
         await self._send_message(prompt)
@@ -382,6 +380,30 @@ Start by exploring the codebase and then implement the changes."""
         # Check if Copilot created a plan and is waiting for "start"
         # If so, automatically proceed with implementation
         await self._check_and_start_implementation()
+
+        if self.self_improvement and self.config.enable_self_improvement:
+            duration = max(0.0, time.monotonic() - start_time)
+            outcome_id = f"task_{task.id}_{int(time.time() * 1000)}"
+            self.self_improvement.record_outcome(
+                ActionOutcome(
+                    id=outcome_id,
+                    action_type="work_on_task",
+                    outcome=OutcomeType.SUCCESS,
+                    agent_id="single-agent",
+                    task_id=task.id,
+                    duration_seconds=duration,
+                )
+            )
+
+        if self.memory:
+            state = self.memory.get_agent_state("single-agent")
+            tasks_completed = (state.tasks_completed + 1) if state else 1
+            self.memory.update_agent_state(
+                "single-agent",
+                status="idle",
+                current_task="",
+                tasks_completed=tasks_completed,
+            )
     
     async def _check_and_start_implementation(self):
         """Check if Copilot created a plan and auto-start implementation."""
@@ -504,6 +526,8 @@ For each task, provide clear requirements and acceptance criteria."""
             if content:
                 print(content, end="", flush=True)
                 self._response_content += content
+                if len(self._response_content) > self.config.max_response_chars:
+                    self._response_content = self._response_content[-self.config.max_response_chars:]
         elif event_type_str == "assistant.turn_start":
             logger.info("Assistant turn started")
         elif event_type_str == "assistant.turn_end":
@@ -579,6 +603,9 @@ For each task, provide clear requirements and acceptance criteria."""
         logger.info("Agent Session Complete")
         logger.info(f"Iterations: {self._iteration}")
         logger.info(f"Tasks completed: {self._tasks_completed}")
+
+        if self.memory:
+            self.memory.update_agent_state("single-agent", status="stopped")
         
         # Show proposed tasks
         proposed = self.tool_handler.get_proposed_tasks()

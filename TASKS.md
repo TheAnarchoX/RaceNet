@@ -22,14 +22,15 @@ Each task includes:
 **Priority**: P1  
 **Difficulty**: Medium  
 **Dependencies**: None  
-**Estimated Time**: 2-4 hours
+**Estimated Time**: 2-4 hours  
+**Status**: ✅ Completed
 
 **Description**:
 Enhance the tire physics model with a proper Pacejka "Magic Formula" implementation for more realistic grip behavior.
 
 **Current State**:
-- Basic slip-based grip calculation in `src/racenet/car/tires.py`
-- Simplified combined slip handling
+- Pacejka Magic Formula + combined slip implemented in `src/racenet/car/tires.py`
+- Unit tests cover peak slip and combined slip in `tests/test_tires.py`
 
 **Requirements**:
 1. Implement Pacejka Magic Formula for longitudinal force
@@ -118,6 +119,99 @@ Add brake temperature simulation affecting braking performance.
 
 ---
 
+### Task 1.4: Implement Wheel Dynamics & Slip Ratio Calculation
+**Priority**: P1  
+**Difficulty**: Hard  
+**Dependencies**: Task 1.1  
+**Estimated Time**: 4-6 hours
+
+**Description**:
+Replace simplified slip ratio logic with wheel rotational dynamics driven by engine and brake torque.
+
+**Current State**:
+- `Car._calculate_slip_ratios` uses `SIMPLIFIED_BRAKE_SLIP_FACTOR` and torque heuristics
+- Wheel speeds are derived from vehicle speed, not from wheel angular dynamics
+- ABS/TC decisions are based on these simplified slip estimates
+
+**Requirements**:
+1. Add per-wheel angular velocity state and update it each step
+2. Compute slip ratio from wheel omega and ground speed using tire radius
+3. Apply drive torque to rear wheels and brake torque to all wheels using brake bias
+4. Remove `SIMPLIFIED_BRAKE_SLIP_FACTOR` and torque-based slip heuristics
+5. Ensure ABS/TC operate on the new slip ratios
+
+**Acceptance Criteria**:
+- [ ] Slip ratio reflects wheel angular velocity vs ground speed
+- [ ] Braking reduces wheel speed and vehicle speed realistically
+- [ ] ABS activates under wheel lock conditions using the new slip values
+- [ ] Add unit tests for slip ratio sign and braking behavior
+
+**Files to Modify**:
+- `src/racenet/car/car.py`
+- `src/racenet/car/transmission.py`
+- `tests/test_car.py` (extend) or `tests/test_wheel_dynamics.py` (create)
+
+---
+
+### Task 1.5: Apply Environment Conditions to Physics
+**Priority**: P2  
+**Difficulty**: Medium  
+**Dependencies**: None  
+**Estimated Time**: 2-3 hours
+
+**Description**:
+Use `EnvironmentConditions` to scale aero and tire behavior.
+
+**Current State**:
+- `World.environment` exists but is not used in the simulation loop
+- Aero uses a fixed air density and tires ignore track grip multipliers
+
+**Requirements**:
+1. Pass environment conditions into car or physics updates
+2. Scale aero calculations by environment air density
+3. Apply track grip multiplier to tire forces or surface grip
+4. Add telemetry fields for ambient/track temperature and grip multiplier
+
+**Acceptance Criteria**:
+- [ ] Changing air density affects drag and downforce
+- [ ] Track grip multiplier scales available tire force
+- [ ] Environment values appear in telemetry or info dicts
+- [ ] Add tests validating environmental scaling
+
+**Files to Modify**:
+- `src/racenet/simulation/world.py`
+- `src/racenet/simulation/simulator.py`
+- `src/racenet/car/aero.py`
+- `src/racenet/car/tires.py`
+- `tests/test_simulation.py` (extend)
+
+---
+
+### Task 1.6: Use Chassis Weight Distribution in Suspension
+**Priority**: P2  
+**Difficulty**: Easy  
+**Dependencies**: None  
+**Estimated Time**: 1-2 hours
+
+**Description**:
+Remove hardcoded front/rear weight split in suspension weight transfer.
+
+**Current State**:
+- `Suspension.calculate_weight_transfer` uses fixed 47/53 split, ignoring chassis config
+
+**Requirements**:
+1. Use `Chassis.front_weight_fraction` and `rear_weight_fraction` for static loads
+2. Ensure weight transfer calculations remain normalized and non-negative
+
+**Acceptance Criteria**:
+- [ ] Static wheel loads match chassis weight distribution
+- [ ] No negative wheel loads after transfer
+- [ ] Add a unit test that verifies custom chassis weight distribution
+
+**Files to Modify**:
+- `src/racenet/car/suspension.py`
+- `tests/test_car.py` (extend)
+
 ## Phase 2: Track Generation (P1)
 
 ### Task 2.1: Improve Track Closure Algorithm
@@ -188,17 +282,18 @@ Calculate optimal racing line for generated tracks to provide reference for ML t
 **Estimated Time**: 2-3 hours
 
 **Description**:
-Improve elevation generation to create realistic hill profiles.
+Fix elevation continuity and create realistic hill profiles.
 
 **Requirements**:
-1. Generate smooth elevation changes
-2. Ensure reasonable gradients (max ~12%)
-3. Create interesting elevation features (crests, compressions)
-4. Add elevation to position queries
+1. Fix elevation continuity (segment end elevation must equal next start)
+2. Generate smooth elevation changes across segments
+3. Ensure reasonable gradients (max ~12%)
+4. Create interesting elevation features (crests, compressions)
 5. Account for elevation in physics (gravity component)
+6. Add elevation data to telemetry
 
 **Acceptance Criteria**:
-- [ ] Tracks have realistic elevation changes
+- [ ] Tracks have realistic elevation changes with no discontinuities
 - [ ] No impossible gradients
 - [ ] Elevation affects car physics (acceleration on hills)
 - [ ] Telemetry includes elevation data
@@ -209,6 +304,34 @@ Improve elevation generation to create realistic hill profiles.
 - `src/racenet/car/car.py` (for physics effects)
 
 ---
+
+### Task 2.4: Expose Kerb/Runoff Metadata in Track Queries
+**Priority**: P2  
+**Difficulty**: Medium  
+**Dependencies**: None  
+**Estimated Time**: 2-3 hours
+
+**Description**:
+Expose kerb and runoff information so simulation can apply grip modifiers.
+
+**Current State**:
+- Kerbs and runoff data exist but are not surfaced in track queries
+- `Track.get_track_info_at_position` returns only geometry fields
+
+**Requirements**:
+1. Add helpers to query kerb presence/width and runoff surface at a distance
+2. Include kerb/runoff data in `Track.get_track_info_at_position`
+3. Add tests for kerb/runoff queries
+
+**Acceptance Criteria**:
+- [ ] Track info includes kerb width and grip modifier when applicable
+- [ ] Runoff surface type is reported when beyond track edge
+- [ ] Unit tests validate kerb/runoff lookup
+
+**Files to Modify**:
+- `src/racenet/track/track.py`
+- `src/racenet/track/features.py`
+- `tests/test_track.py` (extend)
 
 ## Phase 3: Telemetry & Analysis (P2)
 
@@ -265,6 +388,36 @@ Create an interface for real-time telemetry visualization (data provider, not UI
 - `examples/telemetry_client.py` (create)
 
 ---
+
+### Task 3.3: Align Telemetry Channels & Wire Recorder
+**Priority**: P2  
+**Difficulty**: Medium  
+**Dependencies**: None  
+**Estimated Time**: 2-3 hours
+
+**Description**:
+Ensure telemetry channels align with actual recorded data and connect `TelemetryRecorder` to the simulator.
+
+**Current State**:
+- Channels for brake, steering, distance, and lateral offset exist but are never recorded
+- Simulator stores telemetry frames but does not use `TelemetryRecorder`
+
+**Requirements**:
+1. Store last driver inputs (throttle/brake/steering/gear) in car telemetry
+2. Include track distance and lateral offset in telemetry frames
+3. Add a `TelemetryRecorder` option in `Simulator` to record per step
+4. Verify export paths with `TelemetryExporter`
+
+**Acceptance Criteria**:
+- [ ] Recorder channels for brake/steering/distance/lateral offset contain data
+- [ ] Simulator can export telemetry via `TelemetryExporter`
+- [ ] Add unit tests for telemetry recording and export
+
+**Files to Modify**:
+- `src/racenet/car/car.py`
+- `src/racenet/simulation/simulator.py`
+- `src/racenet/telemetry/recorder.py`
+- `tests/test_simulation.py` (extend) or `tests/test_telemetry.py` (create)
 
 ## Phase 4: ML Integration (P2)
 
@@ -351,6 +504,36 @@ Add ability to collect demonstration data from reference racing line.
 - `examples/collect_demonstrations.py` (create)
 
 ---
+
+### Task 4.4: Integrate Track Limits & Sector Timing in RaceEnv
+**Priority**: P2  
+**Difficulty**: Medium  
+**Dependencies**: Task 2.4  
+**Estimated Time**: 2-3 hours
+
+**Description**:
+Use `TrackLimits` and sector definitions to drive penalties and timing in the RL environment.
+
+**Current State**:
+- RaceEnv uses width checks for off-track status, ignoring kerbs/runoff
+- Sector timing is not triggered despite sector definitions in `Track`
+
+**Requirements**:
+1. Use `TrackLimits.update` to determine on-track/kerb/off-track status
+2. Record track limit violations in `LapTimer` and scoring
+3. Trigger `LapTimer.cross_sector` when crossing sector boundaries
+4. Include track-limit status in `info` dict
+
+**Acceptance Criteria**:
+- [ ] Off-track detection uses TrackLimits and kerb tolerance
+- [ ] Sector crossings produce valid split times
+- [ ] Lap validity reflects track limit violations
+- [ ] Add environment tests for track-limit behavior
+
+**Files to Modify**:
+- `src/racenet/ml/environment.py`
+- `src/racenet/scoring/lap_timer.py`
+- `tests/test_ml.py` (extend)
 
 ## Phase 5: Visualization (P3)
 
@@ -489,6 +672,29 @@ Add ability to save/load car and track configurations.
 - `configs/` directory (create)
 
 ---
+
+### Task 6.4: Add Telemetry & Scoring Tests
+**Priority**: P3  
+**Difficulty**: Easy  
+**Dependencies**: None  
+**Estimated Time**: 1-2 hours
+
+**Description**:
+Add targeted tests for telemetry recording/export and scoring utilities.
+
+**Requirements**:
+1. Unit tests for `TelemetryRecorder` channel recording and lap splits
+2. Unit tests for `TelemetryExporter` CSV/JSON outputs
+3. Unit tests for `LapTimer` sector/lap logic and `DrivingStyleScorer`
+
+**Acceptance Criteria**:
+- [ ] Telemetry recorder/exporter tests pass with sample data
+- [ ] Lap timer and style scorer behavior validated by tests
+- [ ] Coverage includes telemetry and scoring modules
+
+**Files to Modify**:
+- `tests/test_telemetry.py` (create)
+- `tests/test_scoring.py` (create)
 
 ## Task Template (for adding new tasks)
 

@@ -27,6 +27,17 @@ class AgentConfig:
     auto_run_tests: bool = True
     request_timeout: int = 1800  # 30 minute timeout per request
     planner_mode: bool = False  # Dedicated planning/task management mode
+
+    # Performance tuning
+    read_file_max_chars: int = 20000
+    list_directory_max_items: int = 200
+    tool_output_max_chars: int = 20000
+    search_code_max_matches: int = 50
+    max_response_chars: int = 120000
+
+    # Advanced capabilities
+    enable_self_improvement: bool = True
+    enable_memory: bool = True
     
     # Safety settings
     require_approval_for_writes: bool = False

@@ -6,12 +6,16 @@ Tools that give the Copilot agent the ability to interact with the repository.
 
 import json
 import os
+import random
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 from agent.config import AgentConfig
+from agent.memory import KnowledgeEntry, KnowledgeType, Importance, RepositoryMemory
+from agent.self_improvement import ActionOutcome, OutcomeType, SelfImprovementEngine
 from agent.task_manager import TaskManager
 
 try:
@@ -48,6 +52,7 @@ def _build_tool_handler(tool_handler: "ToolHandler") -> Callable[[ToolInvocation
 def create_tool_definitions(
     config: AgentConfig,
     tool_handler: Optional["ToolHandler"] = None,
+    include_memory_tools: bool = False,
 ) -> list[Any]:
     """Create tool definitions for the Copilot SDK."""
     definitions = [
@@ -60,6 +65,18 @@ def create_tool_definitions(
                     "path": {
                         "type": "string",
                         "description": "Path to the file relative to repository root"
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "description": "Optional 1-based start line to read"
+                    },
+                    "end_line": {
+                        "type": "integer",
+                        "description": "Optional 1-based end line to read"
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Maximum characters to return (default: config.read_file_max_chars)"
                     }
                 },
                 "required": ["path"]
@@ -96,6 +113,10 @@ def create_tool_definitions(
                     "recursive": {
                         "type": "boolean",
                         "description": "Whether to list recursively (default: false)"
+                    },
+                    "max_items": {
+                        "type": "integer",
+                        "description": "Maximum number of items to return (default: config.list_directory_max_items)"
                     }
                 },
                 "required": ["path"]
@@ -114,6 +135,10 @@ def create_tool_definitions(
                     "timeout": {
                         "type": "integer",
                         "description": "Timeout in seconds (default: 300)"
+                    },
+                    "max_output_chars": {
+                        "type": "integer",
+                        "description": "Maximum stdout/stderr characters to return (default: config.tool_output_max_chars)"
                     }
                 },
                 "required": ["command"]
@@ -132,6 +157,10 @@ def create_tool_definitions(
                     "verbose": {
                         "type": "boolean",
                         "description": "Enable verbose output"
+                    },
+                    "max_output_chars": {
+                        "type": "integer",
+                        "description": "Maximum stdout/stderr characters to return (default: config.tool_output_max_chars)"
                     }
                 },
                 "required": []
@@ -167,6 +196,24 @@ def create_tool_definitions(
                 "type": "object",
                 "properties": {},
                 "required": []
+            }
+        },
+        {
+            "name": "mark_task_complete",
+            "description": "Mark a task or specific acceptance criterion as complete",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID to mark complete"
+                    },
+                    "criterion_index": {
+                        "type": "integer",
+                        "description": "Optional: specific criterion index (0-based) to mark complete"
+                    }
+                },
+                "required": ["task_id"]
             }
         },
         {
@@ -232,6 +279,10 @@ def create_tool_definitions(
                     "file_pattern": {
                         "type": "string",
                         "description": "File pattern to search in (e.g., '*.py')"
+                    },
+                    "max_matches": {
+                        "type": "integer",
+                        "description": "Maximum matches to return (default: config.search_code_max_matches)"
                     }
                 },
                 "required": ["pattern"]
@@ -260,250 +311,347 @@ def create_tool_definitions(
                 "required": ["message"]
             }
         },
-        # === Planner Mode Tools ===
-        {
-            "name": "get_task_details",
-            "description": "Get detailed information about a specific task including full description, requirements, and acceptance criteria",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The task ID (e.g., '1.1', '2.3')"
-                    }
-                },
-                "required": ["task_id"]
-            }
-        },
-        {
-            "name": "update_task",
-            "description": "Update an existing task's details (description, requirements, priority, etc.)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The task ID to update"
-                    },
-                    "description": {
-                        "type": "string",
-                        "description": "New description for the task"
-                    },
-                    "priority": {
-                        "type": "string",
-                        "description": "New priority: P1, P2, or P3"
-                    },
-                    "requirements": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Updated list of requirements"
-                    },
-                    "acceptance_criteria": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Updated acceptance criteria"
-                    },
-                    "current_state": {
-                        "type": "string",
-                        "description": "Updated current implementation state"
-                    }
-                },
-                "required": ["task_id"]
-            }
-        },
-        {
-            "name": "get_file_structure",
-            "description": "Get a tree-view structure of a directory with file sizes and types",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to analyze (relative to repo root)"
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "description": "Maximum depth to traverse (default: 3)"
-                    },
-                    "include_hidden": {
-                        "type": "boolean",
-                        "description": "Include hidden files/directories (default: false)"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "analyze_code_quality",
-            "description": "Analyze code quality of a file or directory (complexity, issues, TODOs, missing docstrings)",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to file or directory to analyze"
-                    }
-                },
-                "required": ["path"]
-            }
-        },
-        {
-            "name": "find_todos_and_fixmes",
-            "description": "Find all TODO, FIXME, HACK, and XXX comments in the codebase",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to search in (default: entire repo)"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "get_test_coverage",
-            "description": "Get test coverage information showing which files have tests and which don't",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        {
-            "name": "mark_task_complete",
-            "description": "Mark a task or specific acceptance criterion as complete",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task_id": {
-                        "type": "string",
-                        "description": "The task ID to mark complete"
-                    },
-                    "criterion_index": {
-                        "type": "integer",
-                        "description": "Optional: specific criterion index (0-based) to mark complete"
-                    }
-                },
-                "required": ["task_id"]
-            }
-        },
-        {
-            "name": "get_dependencies_graph",
-            "description": "Get task dependencies as a graph showing which tasks block others",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
-        # === Additional Planner Tools ===
-        {
-            "name": "get_code_stats",
-            "description": "Get statistics about the codebase: lines of code, file counts, module sizes",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to analyze (default: src/)"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "get_import_graph",
-            "description": "Get the import dependency graph showing how modules depend on each other",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to analyze (default: src/racenet)"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "analyze_module",
-            "description": "Deep analysis of a Python module: classes, functions, complexity, docstring coverage",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the Python file or module directory"
-                    }
-                },
-                "required": ["path"]
-            }
-        },
-        {
-            "name": "search_in_files",
-            "description": "Search for a pattern in files with context lines around matches",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Search pattern (regex supported)"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Path to search in (default: entire repo)"
-                    },
-                    "file_pattern": {
-                        "type": "string",
-                        "description": "File glob pattern (default: *.py)"
-                    },
-                    "context_lines": {
-                        "type": "integer",
-                        "description": "Number of context lines around matches (default: 2)"
-                    }
-                },
-                "required": ["pattern"]
-            }
-        },
-        {
-            "name": "get_function_signatures",
-            "description": "Get all function and method signatures from a file or module",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the Python file or directory"
-                    }
-                },
-                "required": ["path"]
-            }
-        },
-        {
-            "name": "get_class_hierarchy",
-            "description": "Get class definitions and their inheritance hierarchy from a module",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to analyze (default: src/racenet)"
-                    }
-                },
-                "required": []
-            }
-        },
-        {
-            "name": "compare_with_gt3_specs",
-            "description": "Compare current physics implementation against GT3 reference specifications",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": []
-            }
-        },
     ]
+
+    if config.planner_mode:
+        definitions.extend([
+            {
+                "name": "get_task_details",
+                "description": "Get detailed information about a specific task including full description, requirements, and acceptance criteria",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "The task ID (e.g., '1.1', '2.3')"
+                        }
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            {
+                "name": "update_task",
+                "description": "Update an existing task's details (description, requirements, priority, etc.)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "The task ID to update"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "New description for the task"
+                        },
+                        "priority": {
+                            "type": "string",
+                            "description": "New priority: P1, P2, or P3"
+                        },
+                        "requirements": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Updated list of requirements"
+                        },
+                        "acceptance_criteria": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Updated acceptance criteria"
+                        },
+                        "current_state": {
+                            "type": "string",
+                            "description": "Updated current implementation state"
+                        }
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            {
+                "name": "get_file_structure",
+                "description": "Get a tree-view structure of a directory with file sizes and types",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to analyze (relative to repo root)"
+                        },
+                        "max_depth": {
+                            "type": "integer",
+                            "description": "Maximum depth to traverse (default: 3)"
+                        },
+                        "include_hidden": {
+                            "type": "boolean",
+                            "description": "Include hidden files/directories (default: false)"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "analyze_code_quality",
+                "description": "Analyze code quality of a file or directory (complexity, issues, TODOs, missing docstrings)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to file or directory to analyze"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "find_todos_and_fixmes",
+                "description": "Find all TODO, FIXME, HACK, and XXX comments in the codebase",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to search in (default: entire repo)"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "get_test_coverage",
+                "description": "Get test coverage information showing which files have tests and which don't",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            {
+                "name": "get_dependencies_graph",
+                "description": "Get task dependencies as a graph showing which tasks block others",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            # === Additional Planner Tools ===
+            {
+                "name": "get_code_stats",
+                "description": "Get statistics about the codebase: lines of code, file counts, module sizes",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to analyze (default: src/)"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "get_import_graph",
+                "description": "Get the import dependency graph showing how modules depend on each other",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to analyze (default: src/racenet)"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "analyze_module",
+                "description": "Deep analysis of a Python module: classes, functions, complexity, docstring coverage",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the Python file or module directory"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "search_in_files",
+                "description": "Search for a pattern in files with context lines around matches",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Search pattern (regex supported)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Path to search in (default: entire repo)"
+                        },
+                        "file_pattern": {
+                            "type": "string",
+                            "description": "File glob pattern (default: *.py)"
+                        },
+                        "context_lines": {
+                            "type": "integer",
+                            "description": "Number of context lines around matches (default: 2)"
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            },
+            {
+                "name": "get_function_signatures",
+                "description": "Get all function and method signatures from a file or module",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to the Python file or directory"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            {
+                "name": "get_class_hierarchy",
+                "description": "Get class definitions and their inheritance hierarchy from a module",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path to analyze (default: src/racenet)"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "compare_with_gt3_specs",
+                "description": "Compare current physics implementation against GT3 reference specifications",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+        ])
+
+    if include_memory_tools:
+        definitions.extend([
+            {
+                "name": "share_knowledge",
+                "description": "Store a knowledge entry in the local repository memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "knowledge_type": {
+                            "type": "string",
+                            "description": "Type: code_fact, pattern, task_learning, dependency, bug_fix, optimization, test_result, agent_insight, convention, todo"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The knowledge content"
+                        },
+                        "importance": {
+                            "type": "string",
+                            "description": "Importance: low, medium, high, critical"
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Tags for categorization"
+                        },
+                        "related_file": {
+                            "type": "string",
+                            "description": "Related file path"
+                        },
+                        "source_task": {
+                            "type": "string",
+                            "description": "Related task ID"
+                        }
+                    },
+                    "required": ["knowledge_type", "content"]
+                }
+            },
+            {
+                "name": "query_knowledge",
+                "description": "Query the local repository memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        },
+                        "knowledge_type": {
+                            "type": "string",
+                            "description": "Filter by type"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Filter by related file"
+                        }
+                    },
+                    "required": []
+                }
+            },
+            {
+                "name": "acquire_file",
+                "description": "Acquire a lock on a file before editing (single-agent memory)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        }
+                    },
+                    "required": ["file_path"]
+                }
+            },
+            {
+                "name": "release_file",
+                "description": "Release a file lock after editing (single-agent memory)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "Path to the file"
+                        }
+                    },
+                    "required": ["file_path"]
+                }
+            },
+            {
+                "name": "mark_knowledge_useful",
+                "description": "Mark a knowledge entry as useful",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "knowledge_id": {
+                            "type": "string",
+                            "description": "ID of the knowledge entry"
+                        }
+                    },
+                    "required": ["knowledge_id"]
+                }
+            },
+            {
+                "name": "get_memory_status",
+                "description": "Get a summary of local repository memory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+        ])
 
     if not HAS_COPILOT_SDK or tool_handler is None:
         return definitions
@@ -523,9 +671,19 @@ def create_tool_definitions(
 class ToolHandler:
     """Handles tool execution for the agent."""
     
-    def __init__(self, config: AgentConfig, task_manager: TaskManager):
+    def __init__(
+        self,
+        config: AgentConfig,
+        task_manager: TaskManager,
+        memory: RepositoryMemory | None = None,
+        self_improvement: SelfImprovementEngine | None = None,
+        agent_id: str = "agent",
+    ):
         self.config = config
         self.task_manager = task_manager
+        self.memory = memory
+        self.self_improvement = self_improvement
+        self.agent_id = agent_id
         self._proposed_tasks: list[dict] = []
     
     def handle_tool_call(self, name: str, parameters: dict[str, Any]) -> str:
@@ -560,17 +718,93 @@ class ToolHandler:
             "get_function_signatures": self._get_function_signatures,
             "get_class_hierarchy": self._get_class_hierarchy,
             "compare_with_gt3_specs": self._compare_with_gt3_specs,
+            # Memory tools (single-agent)
+            "share_knowledge": self._share_knowledge,
+            "query_knowledge": self._query_knowledge,
+            "acquire_file": self._acquire_file,
+            "release_file": self._release_file,
+            "mark_knowledge_useful": self._mark_knowledge_useful,
+            "get_memory_status": self._get_memory_status,
         }
         
         handler = handlers.get(name)
         if not handler:
             return json.dumps({"error": f"Unknown tool: {name}"})
-        
+
+        start = time.monotonic()
+        outcome = OutcomeType.SUCCESS
+        error_message = ""
+        result: Any = None
+
         try:
             result = handler(parameters)
+            if isinstance(result, dict) and "error" in result:
+                outcome = OutcomeType.FAILURE
+                error_message = str(result.get("error", ""))
+                self._record_error_knowledge(name, error_message, parameters)
             return json.dumps(result) if isinstance(result, (dict, list)) else str(result)
         except Exception as e:
+            outcome = OutcomeType.ERROR
+            error_message = str(e)
+            self._record_error_knowledge(name, error_message, parameters)
             return json.dumps({"error": str(e)})
+        finally:
+            self._record_tool_outcome(name, outcome, start, error_message, parameters)
+
+    def _record_tool_outcome(
+        self,
+        tool_name: str,
+        outcome: OutcomeType,
+        start_time: float,
+        error_message: str,
+        parameters: dict[str, Any],
+    ) -> None:
+        if not self.self_improvement or not self.config.enable_self_improvement:
+            return
+
+        duration = max(0.0, time.monotonic() - start_time)
+        outcome_id = f"outcome_{int(time.time() * 1000)}_{random.randint(1000, 9999)}"
+
+        action_outcome = ActionOutcome(
+            id=outcome_id,
+            action_type=tool_name,
+            outcome=outcome,
+            agent_id=self.agent_id,
+            task_id="",
+            details={"params": parameters},
+            duration_seconds=duration,
+            tools_used=[tool_name],
+            error_message=error_message,
+        )
+
+        self.self_improvement.record_outcome(action_outcome)
+
+    def _record_error_knowledge(
+        self,
+        tool_name: str,
+        error_message: str,
+        parameters: dict[str, Any],
+    ) -> None:
+        if not self.memory:
+            return
+
+        related_file = ""
+        if "path" in parameters:
+            related_file = str(parameters.get("path", ""))
+        elif "file_path" in parameters:
+            related_file = str(parameters.get("file_path", ""))
+
+        entry = KnowledgeEntry(
+            id="",
+            type=KnowledgeType.TASK_LEARNING,
+            content=f"Tool {tool_name} failed: {error_message}",
+            importance=Importance.MEDIUM,
+            source_agent=self.agent_id,
+            source_file=related_file,
+            tags=["tool_error", tool_name],
+        )
+
+        self.memory.store_knowledge(entry)
     
     def _read_file(self, params: dict) -> dict:
         """Read a file from the repository."""
@@ -579,10 +813,45 @@ class ToolHandler:
             return {"error": f"File not found: {params['path']}"}
         if not path.is_file():
             return {"error": f"Not a file: {params['path']}"}
-        
+
+        max_chars = params.get("max_chars", self.config.read_file_max_chars)
+        start_line = params.get("start_line")
+        end_line = params.get("end_line")
+
         try:
             content = path.read_text()
-            return {"path": params["path"], "content": content, "size": len(content)}
+            total_size = len(content)
+
+            if start_line is not None or end_line is not None:
+                lines = content.splitlines()
+                total_lines = len(lines)
+                start = max(1, int(start_line) if start_line is not None else 1)
+                end = min(total_lines, int(end_line) if end_line is not None else total_lines)
+                sliced = "\n".join(lines[start - 1:end])
+                truncated = start > 1 or end < total_lines
+                return {
+                    "path": params["path"],
+                    "content": sliced,
+                    "size": len(sliced),
+                    "total_size": total_size,
+                    "start_line": start,
+                    "end_line": end,
+                    "total_lines": total_lines,
+                    "truncated": truncated,
+                }
+
+            if max_chars:
+                max_chars = int(max_chars)
+                if total_size > max_chars:
+                    return {
+                        "path": params["path"],
+                        "content": content[:max_chars],
+                        "size": max_chars,
+                        "total_size": total_size,
+                        "truncated": True,
+                    }
+
+            return {"path": params["path"], "content": content, "size": total_size}
         except Exception as e:
             return {"error": f"Failed to read file: {e}"}
     
@@ -606,6 +875,7 @@ class ToolHandler:
         """List directory contents."""
         dir_path = params.get("path", ".")
         recursive = params.get("recursive", False)
+        max_items = int(params.get("max_items", self.config.list_directory_max_items))
         
         path = self.config.repo_root / dir_path
         if not path.exists():
@@ -614,6 +884,7 @@ class ToolHandler:
             return {"error": f"Not a directory: {dir_path}"}
         
         items = []
+        truncated = False
         if recursive:
             for item in path.rglob("*"):
                 if ".git" not in str(item):
@@ -622,6 +893,9 @@ class ToolHandler:
                         "path": str(rel_path),
                         "type": "directory" if item.is_dir() else "file"
                     })
+                if max_items and len(items) >= max_items:
+                    truncated = True
+                    break
         else:
             for item in path.iterdir():
                 if item.name != ".git":
@@ -630,13 +904,23 @@ class ToolHandler:
                         "path": str(rel_path),
                         "type": "directory" if item.is_dir() else "file"
                     })
+                if max_items and len(items) >= max_items:
+                    truncated = True
+                    break
         
-        return {"directory": dir_path, "items": items}
+        return {
+            "directory": dir_path,
+            "items": items,
+            "truncated": truncated,
+            "returned": len(items),
+            "max_items": max_items,
+        }
     
     def _run_command(self, params: dict) -> dict:
         """Run a shell command."""
         command = params["command"]
         timeout = params.get("timeout", 300)
+        max_output_chars = int(params.get("max_output_chars", self.config.tool_output_max_chars))
         
         if self.config.dry_run:
             return {"status": "dry_run", "command": command, "message": "Would run command (dry run)"}
@@ -650,11 +934,25 @@ class ToolHandler:
                 text=True,
                 timeout=timeout
             )
+            stdout = result.stdout
+            stderr = result.stderr
+            stdout_truncated = False
+            stderr_truncated = False
+
+            if max_output_chars and stdout and len(stdout) > max_output_chars:
+                stdout = stdout[:max_output_chars]
+                stdout_truncated = True
+            if max_output_chars and stderr and len(stderr) > max_output_chars:
+                stderr = stderr[:max_output_chars]
+                stderr_truncated = True
+
             return {
                 "command": command,
                 "exit_code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
             }
         except subprocess.TimeoutExpired:
             return {"error": f"Command timed out after {timeout} seconds"}
@@ -665,6 +963,7 @@ class ToolHandler:
         """Run pytest tests."""
         test_path = params.get("test_path", "")
         verbose = params.get("verbose", False)
+        max_output_chars = int(params.get("max_output_chars", self.config.tool_output_max_chars))
         
         cmd = ["python", "-m", "pytest"]
         if verbose:
@@ -683,11 +982,25 @@ class ToolHandler:
                 text=True,
                 timeout=600
             )
+            stdout = result.stdout
+            stderr = result.stderr
+            stdout_truncated = False
+            stderr_truncated = False
+
+            if max_output_chars and stdout and len(stdout) > max_output_chars:
+                stdout = stdout[:max_output_chars]
+                stdout_truncated = True
+            if max_output_chars and stderr and len(stderr) > max_output_chars:
+                stderr = stderr[:max_output_chars]
+                stderr_truncated = True
+
             return {
                 "exit_code": result.returncode,
                 "passed": result.returncode == 0,
-                "stdout": result.stdout,
-                "stderr": result.stderr
+                "stdout": stdout,
+                "stderr": stderr,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
             }
         except Exception as e:
             return {"error": f"Failed to run tests: {e}"}
@@ -779,6 +1092,7 @@ class ToolHandler:
         """Search for patterns in code."""
         pattern = params["pattern"]
         file_pattern = params.get("file_pattern", "*")
+        max_matches = int(params.get("max_matches", self.config.search_code_max_matches))
         
         try:
             cmd = ["grep", "-rn", "--include", file_pattern, pattern, str(self.config.repo_root)]
@@ -793,8 +1107,8 @@ class ToolHandler:
             for line in result.stdout.strip().split('\n'):
                 if line:
                     matches.append(line)
-            
-            return {"pattern": pattern, "matches": matches[:50]}  # Limit results
+
+            return {"pattern": pattern, "matches": matches[:max_matches], "max_matches": max_matches}
         except Exception as e:
             return {"error": f"Search failed: {e}"}
     
@@ -1738,4 +2052,105 @@ class ToolHandler:
             "out_of_spec_count": len(out_of_spec),
             "out_of_spec": out_of_spec,
             "specs_not_found": list(specs_missing),
+        }
+
+    # =========================================================================
+    # Local Memory Tools (single-agent mode)
+    # =========================================================================
+
+    def _share_knowledge(self, params: dict) -> dict:
+        if not self.memory:
+            return {"error": "Memory is not enabled for this agent."}
+
+        try:
+            k_type = KnowledgeType(params["knowledge_type"])
+        except ValueError:
+            k_type = KnowledgeType.AGENT_INSIGHT
+
+        try:
+            importance = Importance[params.get("importance", "medium").upper()]
+        except KeyError:
+            importance = Importance.MEDIUM
+
+        entry = KnowledgeEntry(
+            id="",
+            type=k_type,
+            content=params["content"],
+            importance=importance,
+            source_agent=self.agent_id,
+            source_file=params.get("related_file", ""),
+            source_task=params.get("source_task", ""),
+            tags=params.get("tags", []),
+        )
+
+        knowledge_id = self.memory.store_knowledge(entry)
+        return {"status": "shared", "knowledge_id": knowledge_id}
+
+    def _query_knowledge(self, params: dict) -> dict:
+        if not self.memory:
+            return {"error": "Memory is not enabled for this agent."}
+
+        k_type = None
+        if "knowledge_type" in params:
+            try:
+                k_type = KnowledgeType(params["knowledge_type"])
+            except ValueError:
+                k_type = None
+
+        results = self.memory.search_knowledge(
+            query=params.get("query"),
+            knowledge_type=k_type,
+            source_file=params.get("file_path"),
+            limit=20,
+        )
+
+        return {
+            "count": len(results),
+            "results": [
+                {
+                    "id": r.id,
+                    "type": r.type.value,
+                    "content": r.content,
+                    "importance": r.importance.name,
+                    "source_agent": r.source_agent,
+                    "usefulness": r.usefulness_score,
+                }
+                for r in results
+            ],
+        }
+
+    def _acquire_file(self, params: dict) -> dict:
+        if not self.memory:
+            return {"error": "Memory is not enabled for this agent."}
+
+        file_path = params["file_path"]
+        success = self.memory.acquire_file_lock(file_path, self.agent_id)
+        if success:
+            return {"status": "acquired", "file": file_path}
+        holder = self.memory.get_locked_files().get(file_path, "unknown")
+        return {"status": "failed", "held_by": holder}
+
+    def _release_file(self, params: dict) -> dict:
+        if not self.memory:
+            return {"error": "Memory is not enabled for this agent."}
+
+        file_path = params["file_path"]
+        self.memory.release_file_lock(file_path, self.agent_id)
+        return {"status": "released", "file": file_path}
+
+    def _mark_knowledge_useful(self, params: dict) -> dict:
+        if not self.memory:
+            return {"error": "Memory is not enabled for this agent."}
+
+        self.memory.update_usefulness(params["knowledge_id"], 1.0)
+        return {"status": "marked_useful"}
+
+    def _get_memory_status(self, params: dict) -> dict:
+        if not self.memory:
+            return {"error": "Memory is not enabled for this agent."}
+
+        summary = self.memory.get_summary()
+        return {
+            "summary": summary,
+            "locked_files": self.memory.get_locked_files(),
         }

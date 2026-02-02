@@ -26,6 +26,7 @@ from agent.memory import (
 )
 from agent.task_manager import TaskManager, Task, TaskStatus
 from agent.tools import ToolHandler, create_tool_definitions
+from agent.self_improvement import ActionOutcome, OutcomeType, SelfImprovementEngine
 
 try:
     from copilot.types import Tool, ToolInvocation, ToolResult
@@ -76,6 +77,9 @@ class OrchestratorConfig:
     auto_propose_tasks: bool = True
     enable_peer_review: bool = True
     require_tests: bool = True
+
+    # Advanced capabilities
+    enable_self_improvement: bool = True
     
     # Safety
     dry_run: bool = False
@@ -106,12 +110,14 @@ class AgentWorker:
         memory: RepositoryMemory,
         task_manager: TaskManager,
         role: AgentRole = AgentRole.GENERALIST,
+        self_improvement: SelfImprovementEngine | None = None,
     ):
         self.agent_id = agent_id
         self.config = config
         self.memory = memory
         self.task_manager = task_manager
         self.role = role
+        self.self_improvement = self_improvement
         
         # Create agent-specific config
         self.agent_config = AgentConfig(
@@ -121,7 +127,13 @@ class AgentWorker:
             cli_url=config.cli_url,
         )
         
-        self.tool_handler = ToolHandler(self.agent_config, task_manager)
+        self.tool_handler = ToolHandler(
+            self.agent_config,
+            task_manager,
+            memory=memory,
+            self_improvement=self_improvement,
+            agent_id=agent_id,
+        )
         self._current_task: Optional[Task] = None
         self._running = False
         self._shutting_down = False
@@ -182,12 +194,15 @@ class AgentWorker:
         try:
             await self._client.start()
             logger.info(f"[{self.agent_id}] Client started")
-        except FileNotFoundError:
-            logger.error(f"[{self.agent_id}] Copilot CLI not found")
-            return
-        except ConnectionError:
-            logger.error(f"[{self.agent_id}] Could not connect to Copilot CLI")
-            return
+        except (FileNotFoundError, ConnectionError) as exc:
+            logger.warning(
+                f"[{self.agent_id}] Copilot client unavailable ({exc}); "
+                "falling back to mock client"
+            )
+            from agent.autonomous_agent import MockCopilotClient
+            self._client = MockCopilotClient()
+            self._client.tool_handler = self.tool_handler
+            await self._client.start()
         
         # Create session with hive mind context
         tools = create_tool_definitions(self.agent_config, self.tool_handler)
@@ -503,6 +518,8 @@ Be a good team player. Share knowledge, avoid conflicts, and help the hive succe
         task = self._current_task
         if not task:
             return
+
+        start_time = asyncio.get_event_loop().time()
         
         self.memory.update_agent_state(
             self.agent_id,
@@ -561,9 +578,38 @@ Start by exploring what you need to do."""
                 "completed",
                 f"Completed work on Task {task.id}: {task.title}"
             )
+
+            if self.self_improvement and self.config.enable_self_improvement:
+                duration = max(0.0, asyncio.get_event_loop().time() - start_time)
+                outcome_id = f"task_{task.id}_{int(datetime.now().timestamp() * 1000)}"
+                self.self_improvement.record_outcome(
+                    ActionOutcome(
+                        id=outcome_id,
+                        action_type="work_on_task",
+                        outcome=OutcomeType.SUCCESS,
+                        agent_id=self.agent_id,
+                        task_id=task.id,
+                        duration_seconds=duration,
+                    )
+                )
             
         except Exception as e:
             logger.error(f"[{self.agent_id}] Error working on task: {e}")
+
+            if self.self_improvement and self.config.enable_self_improvement:
+                duration = max(0.0, asyncio.get_event_loop().time() - start_time)
+                outcome_id = f"task_{task.id}_{int(datetime.now().timestamp() * 1000)}"
+                self.self_improvement.record_outcome(
+                    ActionOutcome(
+                        id=outcome_id,
+                        action_type="work_on_task",
+                        outcome=OutcomeType.ERROR,
+                        agent_id=self.agent_id,
+                        task_id=task.id,
+                        duration_seconds=duration,
+                        error_message=str(e),
+                    )
+                )
             
             # Share the error as knowledge
             self.memory.store_knowledge(KnowledgeEntry(
@@ -887,6 +933,11 @@ class MultiAgentOrchestrator:
     def __init__(self, config: OrchestratorConfig):
         self.config = config
         self.memory = RepositoryMemory(config.repo_root)
+        self.self_improvement = (
+            SelfImprovementEngine(config.repo_root)
+            if config.enable_self_improvement
+            else None
+        )
         self.task_manager = TaskManager(config.repo_root / config.tasks_file)
         self.workers: list[AgentWorker] = []
         self._running = False
@@ -990,6 +1041,7 @@ class MultiAgentOrchestrator:
                 memory=self.memory,
                 task_manager=self.task_manager,
                 role=role,
+                self_improvement=self.self_improvement,
             )
             
             self.workers.append(worker)
