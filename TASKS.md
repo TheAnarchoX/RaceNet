@@ -39,11 +39,11 @@ Enhance the tire physics model with a proper Pacejka "Magic Formula" implementat
 5. Tune parameters for GT3-style tires
 
 **Acceptance Criteria**:
-- [ ] Tire forces match expected GT3 behavior (~1.5-1.6g cornering)
-- [ ] Combined slip properly reduces available grip
-- [ ] Peak slip occurs at realistic values (~8-10% longitudinal, ~8° lateral)
-- [ ] All existing tests pass
-- [ ] Add unit tests for Pacejka implementation
+- [x] Tire forces match expected GT3 behavior (~1.5-1.6g cornering)
+- [x] Combined slip properly reduces available grip
+- [x] Peak slip occurs at realistic values (~8-10% longitudinal, ~8° lateral)
+- [x] All existing tests pass
+- [x] Add unit tests for Pacejka implementation
 
 **Files to Modify**:
 - `src/racenet/car/tires.py`
