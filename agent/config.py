@@ -26,6 +26,7 @@ class AgentConfig:
     auto_propose_tasks: bool = True
     auto_run_tests: bool = True
     request_timeout: int = 1800  # 30 minute timeout per request
+    planner_mode: bool = False  # Dedicated planning/task management mode
     
     # Safety settings
     require_approval_for_writes: bool = False

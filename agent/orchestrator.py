@@ -169,6 +169,7 @@ class AgentWorker:
         if use_mock:
             from agent.autonomous_agent import MockCopilotClient
             self._client = MockCopilotClient()
+            self._client.tool_handler = self.tool_handler
             logger.debug(f"[{self.agent_id}] Using mock client for dry-run mode")
         else:
             # Initialize real client

@@ -8,6 +8,7 @@ Uses the GitHub Copilot SDK to work on tasks and evolve the project.
 import asyncio
 import json
 import logging
+import re
 import signal
 import sys
 from typing import Any, Callable, Optional
@@ -70,6 +71,82 @@ RaceNet simulates GT3 racing cars with:
 - Optimal tire temp: ~85-100°C
 
 Be thorough, methodical, and write production-quality code.
+"""
+
+
+PLANNER_SYSTEM_MESSAGE = """You are a strategic planner for RaceNet, a GT3-style racing simulation framework for ML experimentation.
+
+Your mission is to DEEPLY ANALYZE the codebase and create, refine, and prioritize tasks in TASKS.md.
+
+## CRITICAL: Deep Code Analysis Required
+
+You MUST read and analyze the ACTUAL SOURCE CODE - not just documentation. For every area you evaluate:
+1. Read the implementation files directly (not just docstrings)
+2. Look at how components connect and interact
+3. Identify actual bugs, missing features, or code smells
+4. Find hardcoded values that should be configurable
+5. Spot duplicated logic or abstraction opportunities
+6. Check test coverage gaps by reading test files
+
+## Task Categories to Consider
+
+**Feature Development**:
+- Missing physics models (aero, suspension, drivetrain)
+- Track feature improvements
+- ML environment enhancements
+- Telemetry/visualization
+
+**Tech Debt**:
+- Code that doesn't follow project patterns
+- Missing type hints or docstrings
+- Hardcoded magic numbers
+- Poor separation of concerns
+- Missing error handling
+
+**DevOps & Infrastructure**:
+- CI/CD improvements
+- Test infrastructure
+- Development tooling
+- Build/packaging
+
+**Repository Hygiene**:
+- Documentation gaps
+- Outdated comments
+- Dead code
+- Inconsistent naming
+- Missing examples
+
+## Workflow
+
+1. **READ TASKS.md** first to understand current state
+2. **DEEP DIVE into src/** - read actual implementation files:
+   - `src/racenet/car/` - all vehicle components
+   - `src/racenet/track/` - track generation
+   - `src/racenet/simulation/` - physics and world
+   - `src/racenet/ml/` - RL environment
+   - `src/racenet/telemetry/` - data recording
+   - `src/racenet/scoring/` - reward system
+3. **READ tests/** to understand coverage gaps
+4. **Analyze** what's actually implemented vs. what's stubbed/incomplete
+5. **Create or refine tasks** with specific, actionable requirements
+
+## Task Quality Standards
+
+Each task you create/refine must have:
+- Clear, specific title
+- Concrete requirements (not vague goals)
+- Acceptance criteria that can be verified
+- Accurate file references
+- Realistic difficulty assessment
+- Proper dependency chains
+
+## GT3 Reference (for physics tasks)
+- Mass: ~1300 kg | Power: ~500-550 hp
+- Cornering: ~1.5-1.6g | Braking: ~1.8-2.0g
+- Peak tire slip: 8-10% long, 8° lateral
+- Optimal tire temp: 85-100°C
+
+Remember: Your value comes from READING THE CODE and finding real issues, not making generic suggestions.
 """
 
 
@@ -176,10 +253,13 @@ class AutonomousAgent:
         
         # Create session with tools
         tools = create_tool_definitions(self.config, self.tool_handler)
+        
+        # Use planner or task worker system message
+        system_msg = PLANNER_SYSTEM_MESSAGE if self.config.planner_mode else SYSTEM_MESSAGE
 
         self.session = await self.client.create_session(
             {
-                "system_message": {"content": SYSTEM_MESSAGE},
+                "system_message": {"content": system_msg},
                 "model": self.config.model,
                 "tools": tools,
             }
@@ -195,6 +275,61 @@ class AutonomousAgent:
         summary = self.task_manager.get_summary()
         logger.info(f"Task Summary: {summary['completed']}/{summary['total']} completed ({summary['completion_percentage']:.1f}%)")
         
+        # Run planner mode or task worker mode
+        if self.config.planner_mode:
+            await self._run_planner_mode()
+        else:
+            await self._run_task_worker_mode()
+    
+    async def _run_planner_mode(self):
+        """Run in dedicated planning mode - analyze codebase and manage tasks."""
+        logger.info("\n🗺️  Running in PLANNER MODE")
+        logger.info("Deep diving into codebase to analyze and manage tasks...\n")
+        
+        # Single comprehensive planning prompt
+        prompt = """Please analyze the RaceNet codebase and manage the task list.
+
+## Your Mission
+
+1. **Read TASKS.md** to understand current task state
+2. **Deep dive into the source code** - READ THE ACTUAL IMPLEMENTATION FILES:
+   - `src/racenet/car/*.py` - all vehicle component implementations
+   - `src/racenet/track/*.py` - track generation code
+   - `src/racenet/simulation/*.py` - physics engine
+   - `src/racenet/ml/*.py` - RL environment
+   - `src/racenet/telemetry/*.py` - data recording
+   - `src/racenet/scoring/*.py` - reward system
+3. **Read tests/** to find coverage gaps
+4. **Identify issues** - bugs, incomplete features, tech debt, missing tests
+5. **Update TASKS.md** with new or refined tasks
+
+## What to Look For
+
+- **Incomplete implementations**: Stubs, TODOs, hardcoded values
+- **Missing features**: Compare to GT3 specs in copilot-instructions.md
+- **Tech debt**: Code that doesn't follow patterns, missing types/docs
+- **Test gaps**: Components without adequate test coverage
+- **DevOps needs**: CI/CD, tooling, build improvements
+- **Documentation**: Outdated or missing docs
+
+## Output
+
+After your analysis, update TASKS.md by:
+- Adding new specific, actionable tasks
+- Refining existing task descriptions with more detail
+- Adjusting priorities based on dependencies and impact
+- Marking any completed tasks
+
+DO NOT just read documentation - READ THE CODE and understand what's actually implemented.
+Start by reading TASKS.md, then systematically explore the source code."""
+
+        await self._send_message(prompt)
+        await self._check_and_start_implementation()
+        
+        logger.info("\n🗺️  Planning session complete!")
+    
+    async def _run_task_worker_mode(self):
+        """Run normal task worker mode - pick up and complete tasks."""
         # Main loop
         while self._iteration < self.config.max_iterations and not self._shutting_down:
             self._iteration += 1
@@ -428,6 +563,7 @@ class MockCopilotSession:
         self.session_id = "mock-session-001"
         self.messages = []
         self._event_handlers = []
+        self._iteration_count = 0
     
     def on(self, handler: Callable):
         """Register event handler (SDK pattern)."""
@@ -438,16 +574,66 @@ class MockCopilotSession:
         """Send a message and wait for idle (SDK pattern)."""
         prompt = options.get("prompt", "")
         self.messages.append({"role": "user", "content": prompt})
+        self._iteration_count += 1
         
         # Add a small delay to simulate real API latency
         await asyncio.sleep(0.5)
+        
+        # Build a more informative mock response
+        response_parts = []
+        prompt_lower = prompt.lower()
+        
+        # Check if this is a task work prompt (handles both single agent and hive prompts)
+        is_task_prompt = (
+            ("Task" in prompt and "work on" in prompt_lower) or
+            ("assigned to task" in prompt_lower)
+        )
+        
+        if is_task_prompt:
+            task_match = re.search(r'Task (\d+\.\d+)', prompt)
+            task_id = task_match.group(1) if task_match else "unknown"
+            
+            response_parts.append(f"\n[Mock Mode] Working on Task {task_id}")
+            response_parts.append("[Mock Mode] In dry-run mode, simulating tool calls:")
+            
+            # Simulate some tool calls
+            if self.tool_handler:
+                response_parts.append("  → get_task_summary")
+                try:
+                    self.tool_handler.handle_tool_call("get_task_summary", {})
+                    response_parts.append("    Task progress loaded")
+                except Exception:
+                    pass
+                
+                response_parts.append("  → Simulating file reads and edits")
+            
+            response_parts.append("[Mock Mode] Task work simulation complete.\n")
+        
+        elif "planner" in prompt_lower or "analyze" in prompt_lower:
+            response_parts.append("\n[Mock Mode] Running planner analysis...")
+            response_parts.append("[Mock Mode] Simulating codebase analysis:")
+            
+            # Simulate planner tools
+            if self.tool_handler:
+                response_parts.append("  → get_file_structure")
+                response_parts.append("  → find_todos_and_fixmes")
+                response_parts.append("  → get_test_coverage")
+                response_parts.append("  → get_dependencies_graph")
+            
+            response_parts.append("[Mock Mode] Analysis complete. Would update TASKS.md.\n")
+        
+        else:
+            response_parts.append(f"\n[Mock Mode] Received prompt ({len(prompt)} chars)")
+            response_parts.append("[Mock Mode] In dry-run mode, no actual changes will be made.\n")
+        
+        response_content = "\n".join(response_parts)
         
         # Dispatch mock events to handlers (using proper mock event objects)
         for handler in self._event_handlers:
             # Simulate assistant message
             handler(MockSessionEvent(
                 "assistant.message",
-                {"content": f"\n[Mock Mode] Received prompt: {prompt[:100]}...\n[Mock Mode] In dry-run mode, no actual changes will be made.\n"}
+                {"content": response_content}
             ))
             # Simulate session idle
             handler(MockSessionEvent("session.idle", {}))

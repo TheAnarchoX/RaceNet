@@ -11,6 +11,7 @@ An autonomous development agent system that uses the GitHub Copilot SDK to:
 
 Usage:
     python run_agent.py                    # Run single agent
+    python run_agent.py --plan             # Strategic planner mode
     python run_agent.py --multi 3          # Run 3 coordinated agents
     python run_agent.py --hive             # Run hive mind (default 3 agents)
     python run_agent.py --report           # Show improvement report
@@ -41,6 +42,9 @@ def parse_args() -> argparse.Namespace:
 Examples:
     # Run a single agent
     python run_agent.py
+
+    # Run strategic planner - deep codebase analysis and task management
+    python run_agent.py --plan
 
     # Run 3 coordinated agents as a hive mind
     python run_agent.py --hive
@@ -93,6 +97,11 @@ Examples:
         "--improve",
         action="store_true",
         help="Run improvement cycle and show results"
+    )
+    mode_group.add_argument(
+        "--plan",
+        action="store_true",
+        help="Run dedicated planning mode to analyze codebase and manage tasks"
     )
     
     # Model settings
@@ -194,6 +203,26 @@ def print_banner(mode: str = "single"):
 ║   • Coordinated task assignment (no conflicts)                        ║
 ║   • Self-improving based on performance                               ║
 ║   • Automatic role specialization                                     ║
+║                                                                       ║
+║   Press Ctrl+C to stop                                                ║
+║                                                                       ║
+╚═══════════════════════════════════════════════════════════════════════╝
+"""
+    elif mode == "planner":
+        banner = """
+╔═══════════════════════════════════════════════════════════════════════╗
+║                                                                       ║
+║   🗺️  RaceNet Strategic Planner                                       ║
+║                                                                       ║
+║   Powered by GitHub Copilot SDK                                       ║
+║   Model: GPT-5.2-Codex                                                ║
+║                                                                       ║
+║   Deep codebase analysis mode:                                        ║
+║   • Read actual source code (not just docs)                           ║
+║   • Identify bugs, tech debt, missing features                        ║
+║   • Create new tasks with specific requirements                       ║
+║   • Refine and prioritize existing tasks                              ║
+║   • Analyze test coverage gaps                                        ║
 ║                                                                       ║
 ║   Press Ctrl+C to stop                                                ║
 ║                                                                       ║
@@ -317,6 +346,39 @@ def run_improvement_cycle(repo_root: Path):
     print("\n" + "=" * 60)
 
 
+async def run_planner(args: argparse.Namespace):
+    """Run in dedicated planning mode to analyze codebase and manage tasks."""
+    config = AgentConfig(
+        model=args.model,
+        repo_root=args.repo_root,
+        max_iterations=1,  # Single planning iteration
+        max_tasks_per_session=1,
+        auto_propose_tasks=False,
+        auto_run_tests=False,
+        require_approval_for_writes=args.require_approval_for_writes,
+        dry_run=args.dry_run,
+        log_level=args.log_level,
+        log_file=args.log_file,
+        cli_url=args.cli_url,
+        planner_mode=True,
+    )
+    
+    print(f"📁 Repository: {config.repo_root}")
+    print(f"🤖 Model: {config.model}")
+    print(f"🗺️  Mode: PLANNER")
+    if config.dry_run:
+        print("⚠️  DRY RUN MODE - No changes will be made")
+    print()
+    
+    # Check prerequisites
+    if not check_prerequisites(config.repo_root):
+        sys.exit(1)
+    
+    # Create and start the agent in planner mode
+    agent = AutonomousAgent(config)
+    await agent.start()
+
+
 async def run_single_agent(args: argparse.Namespace):
     """Run a single autonomous agent."""
     config = AgentConfig(
@@ -403,6 +465,12 @@ async def main():
     
     if args.improve:
         run_improvement_cycle(args.repo_root)
+        return
+    
+    # Handle planner mode
+    if args.plan:
+        print_banner("planner")
+        await run_planner(args)
         return
     
     # Determine mode

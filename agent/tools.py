@@ -259,6 +259,143 @@ def create_tool_definitions(
                 "required": ["message"]
             }
         },
+        # === Planner Mode Tools ===
+        {
+            "name": "get_task_details",
+            "description": "Get detailed information about a specific task including full description, requirements, and acceptance criteria",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID (e.g., '1.1', '2.3')"
+                    }
+                },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "update_task",
+            "description": "Update an existing task's details (description, requirements, priority, etc.)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID to update"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "New description for the task"
+                    },
+                    "priority": {
+                        "type": "string",
+                        "description": "New priority: P1, P2, or P3"
+                    },
+                    "requirements": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Updated list of requirements"
+                    },
+                    "acceptance_criteria": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Updated acceptance criteria"
+                    },
+                    "current_state": {
+                        "type": "string",
+                        "description": "Updated current implementation state"
+                    }
+                },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "get_file_structure",
+            "description": "Get a tree-view structure of a directory with file sizes and types",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to analyze (relative to repo root)"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Maximum depth to traverse (default: 3)"
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "Include hidden files/directories (default: false)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "analyze_code_quality",
+            "description": "Analyze code quality of a file or directory (complexity, issues, TODOs, missing docstrings)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to file or directory to analyze"
+                    }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "find_todos_and_fixmes",
+            "description": "Find all TODO, FIXME, HACK, and XXX comments in the codebase",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to search in (default: entire repo)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "get_test_coverage",
+            "description": "Get test coverage information showing which files have tests and which don't",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
+        {
+            "name": "mark_task_complete",
+            "description": "Mark a task or specific acceptance criterion as complete",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {
+                        "type": "string",
+                        "description": "The task ID to mark complete"
+                    },
+                    "criterion_index": {
+                        "type": "integer",
+                        "description": "Optional: specific criterion index (0-based) to mark complete"
+                    }
+                },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "get_dependencies_graph",
+            "description": "Get task dependencies as a graph showing which tasks block others",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
     ]
 
     if not HAS_COPILOT_SDK or tool_handler is None:
@@ -299,6 +436,15 @@ class ToolHandler:
             "search_code": self._search_code,
             "git_status": self._git_status,
             "git_commit": self._git_commit,
+            # Planner mode tools
+            "get_task_details": self._get_task_details,
+            "update_task": self._update_task,
+            "get_file_structure": self._get_file_structure,
+            "analyze_code_quality": self._analyze_code_quality,
+            "find_todos_and_fixmes": self._find_todos_and_fixmes,
+            "get_test_coverage": self._get_test_coverage,
+            "mark_task_complete": self._mark_task_complete,
+            "get_dependencies_graph": self._get_dependencies_graph,
         }
         
         handler = handlers.get(name)
@@ -584,6 +730,373 @@ class ToolHandler:
             }
         except Exception as e:
             return {"error": f"Git commit failed: {e}"}
+    
+    # =========================================================================
+    # Planner Mode Tools
+    # =========================================================================
+    
+    def _get_task_details(self, params: dict) -> dict:
+        """Get detailed information about a specific task."""
+        self.task_manager.reload()
+        task_id = params["task_id"]
+        
+        task = self.task_manager.tasks.get(task_id)
+        if not task:
+            return {"error": f"Task not found: {task_id}"}
+        
+        return {
+            "id": task.id,
+            "title": task.title,
+            "priority": task.priority.name,
+            "difficulty": task.difficulty.value,
+            "status": task.status.value,
+            "description": task.description,
+            "dependencies": task.dependencies,
+            "estimated_time": task.estimated_time,
+            "requirements": task.requirements,
+            "acceptance_criteria": [
+                {"completed": c, "text": t} 
+                for c, t in task.acceptance_criteria
+            ],
+            "files_to_modify": task.files_to_modify,
+            "current_state": task.current_state,
+            "completion_percentage": task.completion_percentage,
+        }
+    
+    def _update_task(self, params: dict) -> dict:
+        """Update an existing task's details (for use by planner)."""
+        task_id = params["task_id"]
+        self.task_manager.reload()
+        
+        task = self.task_manager.tasks.get(task_id)
+        if not task:
+            return {"error": f"Task not found: {task_id}"}
+        
+        # Collect updates (we'll store them for later TASKS.md modification)
+        updates = {}
+        if "description" in params:
+            updates["description"] = params["description"]
+        if "priority" in params:
+            updates["priority"] = params["priority"]
+        if "requirements" in params:
+            updates["requirements"] = params["requirements"]
+        if "acceptance_criteria" in params:
+            updates["acceptance_criteria"] = params["acceptance_criteria"]
+        if "current_state" in params:
+            updates["current_state"] = params["current_state"]
+        
+        if self.config.dry_run:
+            return {
+                "status": "dry_run",
+                "task_id": task_id,
+                "updates": updates,
+                "message": "Would update task (dry run). Use write_file to update TASKS.md"
+            }
+        
+        return {
+            "status": "pending",
+            "task_id": task_id,
+            "updates": updates,
+            "message": "Task update prepared. Use write_file to update TASKS.md with these changes."
+        }
+    
+    def _get_file_structure(self, params: dict) -> dict:
+        """Get a tree-view structure of a directory."""
+        path_str = params.get("path", ".")
+        max_depth = params.get("max_depth", 3)
+        include_hidden = params.get("include_hidden", False)
+        
+        path = self.config.repo_root / path_str
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        if not path.is_dir():
+            return {"error": f"Not a directory: {path_str}"}
+        
+        def build_tree(dir_path: Path, depth: int = 0) -> list[dict]:
+            if depth >= max_depth:
+                return []
+            
+            items = []
+            try:
+                for item in sorted(dir_path.iterdir()):
+                    # Skip hidden files unless requested
+                    if item.name.startswith('.') and not include_hidden:
+                        continue
+                    # Always skip .git
+                    if item.name == ".git":
+                        continue
+                    
+                    rel_path = str(item.relative_to(self.config.repo_root))
+                    entry = {
+                        "name": item.name,
+                        "path": rel_path,
+                        "type": "directory" if item.is_dir() else "file",
+                    }
+                    
+                    if item.is_file():
+                        try:
+                            entry["size"] = item.stat().st_size
+                            entry["extension"] = item.suffix
+                        except OSError:
+                            pass
+                    
+                    if item.is_dir() and depth + 1 < max_depth:
+                        entry["children"] = build_tree(item, depth + 1)
+                    
+                    items.append(entry)
+            except PermissionError:
+                pass
+            
+            return items
+        
+        return {
+            "root": path_str,
+            "structure": build_tree(path),
+        }
+    
+    def _analyze_code_quality(self, params: dict) -> dict:
+        """Analyze code quality of a file or directory."""
+        import re
+        
+        path_str = params["path"]
+        path = self.config.repo_root / path_str
+        
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        files_to_analyze = []
+        if path.is_file():
+            files_to_analyze = [path]
+        else:
+            files_to_analyze = list(path.rglob("*.py"))
+        
+        results = {
+            "total_files": len(files_to_analyze),
+            "issues": [],
+            "summary": {
+                "missing_docstrings": 0,
+                "todos": 0,
+                "fixmes": 0,
+                "long_functions": 0,
+                "hardcoded_values": 0,
+            }
+        }
+        
+        for file_path in files_to_analyze[:50]:  # Limit for performance
+            try:
+                content = file_path.read_text()
+                rel_path = str(file_path.relative_to(self.config.repo_root))
+                
+                # Check for missing docstrings on functions/classes
+                func_pattern = r'^(\s*)(def|class)\s+(\w+)'
+                for match in re.finditer(func_pattern, content, re.MULTILINE):
+                    indent, keyword, name = match.groups()
+                    # Check if next non-empty line is a docstring
+                    pos = match.end()
+                    remaining = content[pos:pos+200]
+                    if '"""' not in remaining.split('\n')[0:3] and "'''" not in remaining.split('\n')[0:3]:
+                        results["issues"].append({
+                            "file": rel_path,
+                            "type": "missing_docstring",
+                            "message": f"{keyword} '{name}' missing docstring"
+                        })
+                        results["summary"]["missing_docstrings"] += 1
+                
+                # Count TODOs and FIXMEs
+                for pattern, key in [("TODO", "todos"), ("FIXME", "fixmes")]:
+                    count = len(re.findall(rf'#\s*{pattern}', content, re.IGNORECASE))
+                    results["summary"][key] += count
+                
+                # Check for magic numbers (hardcoded values)
+                magic_numbers = re.findall(r'(?<!["\'\w])(\d{3,})(?!["\'\w])', content)
+                results["summary"]["hardcoded_values"] += len(magic_numbers)
+                
+            except Exception as e:
+                results["issues"].append({
+                    "file": str(file_path),
+                    "type": "error",
+                    "message": str(e)
+                })
+        
+        # Limit issues returned
+        results["issues"] = results["issues"][:30]
+        
+        return results
+    
+    def _find_todos_and_fixmes(self, params: dict) -> dict:
+        """Find all TODO, FIXME, HACK, and XXX comments in the codebase."""
+        import re
+        
+        path_str = params.get("path", ".")
+        path = self.config.repo_root / path_str
+        
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        patterns = ["TODO", "FIXME", "HACK", "XXX", "BUG", "NOTE"]
+        findings = []
+        
+        files = list(path.rglob("*.py")) if path.is_dir() else [path]
+        
+        for file_path in files[:100]:  # Limit files
+            try:
+                content = file_path.read_text()
+                lines = content.split('\n')
+                rel_path = str(file_path.relative_to(self.config.repo_root))
+                
+                for i, line in enumerate(lines):
+                    for pattern in patterns:
+                        if re.search(rf'#\s*{pattern}', line, re.IGNORECASE):
+                            findings.append({
+                                "file": rel_path,
+                                "line": i + 1,
+                                "type": pattern,
+                                "content": line.strip()[:100]
+                            })
+            except Exception:
+                pass
+        
+        return {
+            "total": len(findings),
+            "findings": findings[:50],  # Limit results
+            "by_type": {
+                pattern: len([f for f in findings if f["type"] == pattern])
+                for pattern in patterns
+            }
+        }
+    
+    def _get_test_coverage(self, params: dict) -> dict:
+        """Get test coverage information."""
+        src_path = self.config.repo_root / "src"
+        tests_path = self.config.repo_root / "tests"
+        
+        if not src_path.exists():
+            return {"error": "No src/ directory found"}
+        
+        # Find all source files
+        source_files = []
+        for py_file in src_path.rglob("*.py"):
+            if "__pycache__" not in str(py_file):
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                source_files.append(rel_path)
+        
+        # Find all test files
+        test_files = []
+        tested_modules = set()
+        if tests_path.exists():
+            for py_file in tests_path.rglob("test_*.py"):
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                test_files.append(rel_path)
+                # Infer tested module from test file name
+                module_name = py_file.stem.replace("test_", "")
+                tested_modules.add(module_name)
+        
+        # Categorize source files
+        covered = []
+        not_covered = []
+        
+        for src_file in source_files:
+            file_name = Path(src_file).stem
+            if file_name == "__init__":
+                continue
+            if file_name in tested_modules:
+                covered.append(src_file)
+            else:
+                not_covered.append(src_file)
+        
+        return {
+            "source_files": len(source_files),
+            "test_files": len(test_files),
+            "covered_modules": covered,
+            "not_covered_modules": not_covered,
+            "coverage_percentage": (
+                len(covered) / (len(covered) + len(not_covered)) * 100
+                if (covered or not_covered) else 0
+            )
+        }
+    
+    def _mark_task_complete(self, params: dict) -> dict:
+        """Mark a task or specific acceptance criterion as complete."""
+        task_id = params["task_id"]
+        criterion_index = params.get("criterion_index")
+        
+        self.task_manager.reload()
+        task = self.task_manager.tasks.get(task_id)
+        
+        if not task:
+            return {"error": f"Task not found: {task_id}"}
+        
+        if self.config.dry_run:
+            return {
+                "status": "dry_run",
+                "task_id": task_id,
+                "message": "Would mark task/criterion complete (dry run)"
+            }
+        
+        if criterion_index is not None:
+            self.task_manager.mark_criterion_complete(task_id, criterion_index)
+            return {
+                "status": "success",
+                "task_id": task_id,
+                "criterion": criterion_index,
+                "message": f"Marked criterion {criterion_index} complete. Remember to update TASKS.md."
+            }
+        else:
+            from agent.task_manager import TaskStatus
+            self.task_manager.update_task_status(task_id, TaskStatus.COMPLETED)
+            return {
+                "status": "success",
+                "task_id": task_id,
+                "message": "Marked task as complete. Remember to update TASKS.md."
+            }
+    
+    def _get_dependencies_graph(self, params: dict) -> dict:
+        """Get task dependencies as a graph."""
+        self.task_manager.reload()
+        
+        nodes = []
+        edges = []
+        blocked_by = {}
+        
+        for task_id, task in self.task_manager.tasks.items():
+            nodes.append({
+                "id": task_id,
+                "title": task.title,
+                "status": task.status.value,
+                "priority": task.priority.name,
+            })
+            
+            for dep_id in task.dependencies:
+                edges.append({
+                    "from": dep_id,
+                    "to": task_id,
+                })
+                
+                if task_id not in blocked_by:
+                    blocked_by[task_id] = []
+                blocked_by[task_id].append(dep_id)
+        
+        # Find tasks ready to work on (deps met, not completed)
+        ready_tasks = []
+        for task_id, task in self.task_manager.tasks.items():
+            if task.status.value == "completed":
+                continue
+            
+            deps_met = all(
+                self.task_manager.tasks.get(dep_id, None) is None or
+                self.task_manager.tasks[dep_id].status.value == "completed"
+                for dep_id in task.dependencies
+            )
+            
+            if deps_met:
+                ready_tasks.append(task_id)
+        
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "blocked_by": blocked_by,
+            "ready_tasks": ready_tasks,
+        }
     
     def get_proposed_tasks(self) -> list[dict]:
         """Get all proposed tasks."""
