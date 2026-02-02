@@ -620,13 +620,22 @@ Start by exploring what you need to do."""
         event_data = getattr(event, "data", None)
         
         if event_type_str == "assistant.message":
-            content = getattr(event_data, "content", "") if event_data else ""
+            # Handle both content and delta_content for streaming
+            content = (
+                getattr(event_data, "content", "") or 
+                getattr(event_data, "delta_content", "")
+            ) if event_data else ""
             if content:
                 print(f"[{self.agent_id}] {content}", end="", flush=True)
                 self._response_content += content
         
         elif event_type_str == "tool.execution_start":
-            tool_name = getattr(event_data, "toolName", "") if event_data else ""
+            tool_name = (
+                getattr(event_data, "toolName", None) or
+                getattr(event_data, "tool_name", None) or
+                getattr(event_data, "name", None) or
+                ""
+            ) if event_data else ""
             logger.debug(f"[{self.agent_id}]   → Running: {tool_name}")
         
         elif event_type_str == "tool.execution_complete":
@@ -853,6 +862,11 @@ class MultiAgentOrchestrator:
     async def start(self):
         """Start the orchestrator and all agents."""
         self._running = True
+        
+        # Clear stale agents from previous runs
+        stale = self.memory.clear_stale_agents(timeout_seconds=300)
+        if stale:
+            logger.debug(f"Cleared {len(stale)} stale agents from previous runs")
         
         logger.info("=" * 70)
         logger.info("RaceNet Multi-Agent Orchestrator Starting")

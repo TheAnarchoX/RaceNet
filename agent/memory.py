@@ -479,6 +479,51 @@ class RepositoryMemory:
         
         return active
     
+    def clear_all_agents(self):
+        """Clear all agent states from the database.
+        
+        Call this on orchestrator startup to remove stale agents from previous runs.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cursor.execute("DELETE FROM agent_states")
+            cursor.execute("DELETE FROM file_locks")
+            cursor.execute("DELETE FROM messages")
+            
+            conn.commit()
+            conn.close()
+    
+    def clear_stale_agents(self, timeout_seconds: int = 120):
+        """Clear agents that haven't sent a heartbeat recently."""
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            
+            cutoff = datetime.now().timestamp() - timeout_seconds
+            
+            # Get stale agent IDs
+            cursor.execute("SELECT agent_id, last_heartbeat FROM agent_states")
+            stale_ids = []
+            for row in cursor.fetchall():
+                try:
+                    heartbeat = datetime.fromisoformat(row[1]).timestamp()
+                    if heartbeat < cutoff:
+                        stale_ids.append(row[0])
+                except (ValueError, TypeError):
+                    stale_ids.append(row[0])
+            
+            # Delete stale agents
+            for agent_id in stale_ids:
+                cursor.execute("DELETE FROM agent_states WHERE agent_id = ?", (agent_id,))
+                cursor.execute("DELETE FROM file_locks WHERE agent_id = ?", (agent_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            return stale_ids
+    
     # =========================================================================
     # File Locking for Conflict Prevention
     # =========================================================================

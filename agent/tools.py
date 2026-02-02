@@ -397,6 +397,112 @@ def create_tool_definitions(
                 "required": []
             }
         },
+        # === Additional Planner Tools ===
+        {
+            "name": "get_code_stats",
+            "description": "Get statistics about the codebase: lines of code, file counts, module sizes",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to analyze (default: src/)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "get_import_graph",
+            "description": "Get the import dependency graph showing how modules depend on each other",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to analyze (default: src/racenet)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "analyze_module",
+            "description": "Deep analysis of a Python module: classes, functions, complexity, docstring coverage",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Python file or module directory"
+                    }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "search_in_files",
+            "description": "Search for a pattern in files with context lines around matches",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (regex supported)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Path to search in (default: entire repo)"
+                    },
+                    "file_pattern": {
+                        "type": "string",
+                        "description": "File glob pattern (default: *.py)"
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Number of context lines around matches (default: 2)"
+                    }
+                },
+                "required": ["pattern"]
+            }
+        },
+        {
+            "name": "get_function_signatures",
+            "description": "Get all function and method signatures from a file or module",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to the Python file or directory"
+                    }
+                },
+                "required": ["path"]
+            }
+        },
+        {
+            "name": "get_class_hierarchy",
+            "description": "Get class definitions and their inheritance hierarchy from a module",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path to analyze (default: src/racenet)"
+                    }
+                },
+                "required": []
+            }
+        },
+        {
+            "name": "compare_with_gt3_specs",
+            "description": "Compare current physics implementation against GT3 reference specifications",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        },
     ]
 
     if not HAS_COPILOT_SDK or tool_handler is None:
@@ -446,6 +552,14 @@ class ToolHandler:
             "get_test_coverage": self._get_test_coverage,
             "mark_task_complete": self._mark_task_complete,
             "get_dependencies_graph": self._get_dependencies_graph,
+            # Additional planner tools
+            "get_code_stats": self._get_code_stats,
+            "get_import_graph": self._get_import_graph,
+            "analyze_module": self._analyze_module,
+            "search_in_files": self._search_in_files,
+            "get_function_signatures": self._get_function_signatures,
+            "get_class_hierarchy": self._get_class_hierarchy,
+            "compare_with_gt3_specs": self._compare_with_gt3_specs,
         }
         
         handler = handlers.get(name)
@@ -1138,3 +1252,490 @@ class ToolHandler:
     def get_proposed_tasks(self) -> list[dict]:
         """Get all proposed tasks."""
         return self._proposed_tasks
+
+    # =========================================================================
+    # Additional Planner Mode Tools
+    # =========================================================================
+    
+    def _get_code_stats(self, params: dict) -> dict:
+        """Get statistics about the codebase."""
+        path_str = params.get("path", "src")
+        path = self.config.repo_root / path_str
+        
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        stats = {
+            "total_files": 0,
+            "total_lines": 0,
+            "total_code_lines": 0,
+            "total_blank_lines": 0,
+            "total_comment_lines": 0,
+            "files_by_extension": {},
+            "largest_files": [],
+            "modules": {},
+        }
+        
+        all_files = []
+        
+        for py_file in path.rglob("*.py"):
+            if "__pycache__" in str(py_file):
+                continue
+            
+            try:
+                content = py_file.read_text()
+                lines = content.split('\n')
+                
+                code_lines = 0
+                blank_lines = 0
+                comment_lines = 0
+                
+                for line in lines:
+                    stripped = line.strip()
+                    if not stripped:
+                        blank_lines += 1
+                    elif stripped.startswith('#'):
+                        comment_lines += 1
+                    else:
+                        code_lines += 1
+                
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                
+                stats["total_files"] += 1
+                stats["total_lines"] += len(lines)
+                stats["total_code_lines"] += code_lines
+                stats["total_blank_lines"] += blank_lines
+                stats["total_comment_lines"] += comment_lines
+                
+                all_files.append({
+                    "path": rel_path,
+                    "lines": len(lines),
+                    "code_lines": code_lines,
+                })
+                
+                # Track by module (parent directory)
+                module = py_file.parent.name
+                if module not in stats["modules"]:
+                    stats["modules"][module] = {"files": 0, "lines": 0}
+                stats["modules"][module]["files"] += 1
+                stats["modules"][module]["lines"] += len(lines)
+                
+            except Exception:
+                pass
+        
+        # Extension stats
+        for f in path.rglob("*"):
+            if f.is_file() and "__pycache__" not in str(f):
+                ext = f.suffix or "no_extension"
+                stats["files_by_extension"][ext] = stats["files_by_extension"].get(ext, 0) + 1
+        
+        # Top 10 largest files
+        all_files.sort(key=lambda x: x["lines"], reverse=True)
+        stats["largest_files"] = all_files[:10]
+        
+        return stats
+    
+    def _get_import_graph(self, params: dict) -> dict:
+        """Get the import dependency graph."""
+        path_str = params.get("path", "src/racenet")
+        path = self.config.repo_root / path_str
+        
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        imports = {}
+        
+        for py_file in path.rglob("*.py"):
+            if "__pycache__" in str(py_file):
+                continue
+            
+            try:
+                content = py_file.read_text()
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                
+                file_imports = []
+                for line in content.split('\n'):
+                    line = line.strip()
+                    if line.startswith('import ') or line.startswith('from '):
+                        # Extract module name
+                        if line.startswith('from '):
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                module = parts[1]
+                                file_imports.append(module)
+                        else:
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                module = parts[1].split('.')[0]
+                                file_imports.append(module)
+                
+                imports[rel_path] = {
+                    "imports": file_imports,
+                    "internal_imports": [i for i in file_imports if i.startswith('racenet') or i.startswith('agent')],
+                    "external_imports": [i for i in file_imports if not i.startswith('racenet') and not i.startswith('agent')],
+                }
+                
+            except Exception:
+                pass
+        
+        # Identify circular dependencies (simple detection)
+        internal_deps = {}
+        for file, data in imports.items():
+            module_name = file.replace('/', '.').replace('.py', '')
+            for imp in data.get("internal_imports", []):
+                if imp not in internal_deps:
+                    internal_deps[imp] = []
+                internal_deps[imp].append(module_name)
+        
+        return {
+            "file_imports": imports,
+            "dependency_summary": internal_deps,
+            "total_files_analyzed": len(imports),
+        }
+    
+    def _analyze_module(self, params: dict) -> dict:
+        """Deep analysis of a Python module."""
+        path_str = params["path"]
+        path = self.config.repo_root / path_str
+        
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        files = []
+        if path.is_file():
+            files = [path]
+        else:
+            files = list(path.rglob("*.py"))
+        
+        analysis = {
+            "total_files": len(files),
+            "classes": [],
+            "functions": [],
+            "missing_docstrings": [],
+            "complex_functions": [],
+            "constants": [],
+        }
+        
+        for py_file in files[:30]:  # Limit for performance
+            if "__pycache__" in str(py_file):
+                continue
+            
+            try:
+                content = py_file.read_text()
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                lines = content.split('\n')
+                
+                current_class = None
+                indent_stack = []
+                
+                for i, line in enumerate(lines):
+                    stripped = line.strip()
+                    indent = len(line) - len(line.lstrip())
+                    
+                    # Detect class definitions
+                    if stripped.startswith('class '):
+                        match = re.match(r'class\s+(\w+)(?:\(([^)]*)\))?:', stripped)
+                        if match:
+                            name = match.group(1)
+                            parents = match.group(2) or ""
+                            current_class = name
+                            analysis["classes"].append({
+                                "file": rel_path,
+                                "line": i + 1,
+                                "name": name,
+                                "parents": parents,
+                            })
+                            
+                            # Check for docstring
+                            if i + 1 < len(lines) and '"""' not in lines[i + 1] and "'''" not in lines[i + 1]:
+                                analysis["missing_docstrings"].append({
+                                    "file": rel_path,
+                                    "line": i + 1,
+                                    "type": "class",
+                                    "name": name,
+                                })
+                    
+                    # Detect function definitions
+                    elif stripped.startswith('def '):
+                        match = re.match(r'def\s+(\w+)\s*\(([^)]*)\)', stripped)
+                        if match:
+                            name = match.group(1)
+                            params = match.group(2)
+                            
+                            func_info = {
+                                "file": rel_path,
+                                "line": i + 1,
+                                "name": name,
+                                "class": current_class if indent > 0 else None,
+                                "params": params,
+                            }
+                            analysis["functions"].append(func_info)
+                            
+                            # Check for docstring
+                            if i + 1 < len(lines):
+                                next_line = lines[i + 1].strip()
+                                if '"""' not in next_line and "'''" not in next_line:
+                                    analysis["missing_docstrings"].append({
+                                        "file": rel_path,
+                                        "line": i + 1,
+                                        "type": "function",
+                                        "name": name,
+                                    })
+                    
+                    # Detect module-level constants
+                    elif re.match(r'^[A-Z][A-Z_0-9]*\s*=', stripped) and indent == 0:
+                        match = re.match(r'^([A-Z][A-Z_0-9]*)\s*=', stripped)
+                        if match:
+                            analysis["constants"].append({
+                                "file": rel_path,
+                                "line": i + 1,
+                                "name": match.group(1),
+                            })
+                
+            except Exception as e:
+                analysis.setdefault("errors", []).append({
+                    "file": str(py_file),
+                    "error": str(e)
+                })
+        
+        # Limit output size
+        analysis["classes"] = analysis["classes"][:50]
+        analysis["functions"] = analysis["functions"][:100]
+        analysis["missing_docstrings"] = analysis["missing_docstrings"][:30]
+        
+        return analysis
+    
+    def _search_in_files(self, params: dict) -> dict:
+        """Search for a pattern in files with context."""
+        pattern = params["pattern"]
+        path_str = params.get("path", ".")
+        file_pattern = params.get("file_pattern", "*.py")
+        context_lines = params.get("context_lines", 2)
+        
+        path = self.config.repo_root / path_str
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        matches = []
+        
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as e:
+            return {"error": f"Invalid regex pattern: {e}"}
+        
+        files = list(path.rglob(file_pattern)) if path.is_dir() else [path]
+        
+        for f in files[:100]:  # Limit files
+            if "__pycache__" in str(f) or not f.is_file():
+                continue
+            
+            try:
+                content = f.read_text()
+                lines = content.split('\n')
+                rel_path = str(f.relative_to(self.config.repo_root))
+                
+                for i, line in enumerate(lines):
+                    if regex.search(line):
+                        # Get context
+                        start = max(0, i - context_lines)
+                        end = min(len(lines), i + context_lines + 1)
+                        context = lines[start:end]
+                        
+                        matches.append({
+                            "file": rel_path,
+                            "line": i + 1,
+                            "match": line.strip(),
+                            "context": "\n".join(context),
+                        })
+                        
+                        if len(matches) >= 50:
+                            break
+                            
+            except Exception:
+                pass
+            
+            if len(matches) >= 50:
+                break
+        
+        return {
+            "pattern": pattern,
+            "total_matches": len(matches),
+            "matches": matches,
+        }
+    
+    def _get_function_signatures(self, params: dict) -> dict:
+        """Get all function and method signatures from a file or module."""
+        path_str = params["path"]
+        path = self.config.repo_root / path_str
+        
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        files = []
+        if path.is_file():
+            files = [path]
+        else:
+            files = list(path.rglob("*.py"))
+        
+        signatures = []
+        
+        for py_file in files[:50]:
+            if "__pycache__" in str(py_file):
+                continue
+            
+            try:
+                content = py_file.read_text()
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                
+                # Find all function definitions
+                pattern = r'^\s*(async\s+)?def\s+(\w+)\s*\(([^)]*)\)(\s*->\s*[^:]+)?:'
+                
+                for match in re.finditer(pattern, content, re.MULTILINE):
+                    is_async = bool(match.group(1))
+                    name = match.group(2)
+                    params = match.group(3).strip()
+                    return_type = match.group(4).strip() if match.group(4) else None
+                    
+                    # Determine indentation level (method vs function)
+                    line_start = content.rfind('\n', 0, match.start()) + 1
+                    indent = match.start() - line_start
+                    
+                    signatures.append({
+                        "file": rel_path,
+                        "name": name,
+                        "async": is_async,
+                        "params": params,
+                        "return_type": return_type.replace('->', '').strip() if return_type else None,
+                        "is_method": indent > 0,
+                    })
+                    
+            except Exception:
+                pass
+        
+        return {
+            "total_signatures": len(signatures),
+            "signatures": signatures[:200],  # Limit output
+        }
+    
+    def _get_class_hierarchy(self, params: dict) -> dict:
+        """Get class definitions and their inheritance hierarchy."""
+        path_str = params.get("path", "src/racenet")
+        path = self.config.repo_root / path_str
+        
+        if not path.exists():
+            return {"error": f"Path not found: {path_str}"}
+        
+        classes = {}
+        
+        for py_file in path.rglob("*.py"):
+            if "__pycache__" in str(py_file):
+                continue
+            
+            try:
+                content = py_file.read_text()
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                
+                pattern = r'^class\s+(\w+)(?:\(([^)]*)\))?:'
+                
+                for match in re.finditer(pattern, content, re.MULTILINE):
+                    name = match.group(1)
+                    parents_str = match.group(2) or ""
+                    parents = [p.strip() for p in parents_str.split(',') if p.strip()]
+                    
+                    classes[name] = {
+                        "file": rel_path,
+                        "parents": parents,
+                        "children": [],
+                    }
+                    
+            except Exception:
+                pass
+        
+        # Build child relationships
+        for cls_name, cls_info in classes.items():
+            for parent in cls_info["parents"]:
+                if parent in classes:
+                    classes[parent]["children"].append(cls_name)
+        
+        # Identify root classes (no parents in the codebase)
+        roots = [name for name, info in classes.items() 
+                 if not any(p in classes for p in info["parents"])]
+        
+        return {
+            "total_classes": len(classes),
+            "classes": classes,
+            "root_classes": roots,
+        }
+    
+    def _compare_with_gt3_specs(self, params: dict) -> dict:
+        """Compare current physics implementation against GT3 specifications."""
+        # GT3 reference specifications
+        gt3_specs = {
+            "mass_kg": {"target": 1300, "range": (1280, 1350), "unit": "kg"},
+            "power_hp": {"target": 525, "range": (500, 550), "unit": "hp"},
+            "max_cornering_g": {"target": 1.55, "range": (1.5, 1.6), "unit": "g"},
+            "max_braking_g": {"target": 1.9, "range": (1.8, 2.0), "unit": "g"},
+            "peak_slip_ratio": {"target": 0.09, "range": (0.08, 0.10), "unit": "ratio"},
+            "peak_slip_angle_deg": {"target": 9, "range": (8, 10), "unit": "degrees"},
+            "optimal_tire_temp_c": {"target": 92, "range": (85, 100), "unit": "°C"},
+            "downforce_at_200kph_kg": {"target": 800, "range": (600, 1000), "unit": "kg"},
+        }
+        
+        # Search for actual values in the codebase
+        findings = []
+        comparisons = []
+        
+        # Search for configuration values
+        search_patterns = [
+            (r'mass\s*[:=]\s*([\d.]+)', "mass_kg"),
+            (r'power\s*[:=]\s*([\d.]+)', "power_hp"),
+            (r'peak_slip_ratio\s*[:=]\s*([\d.]+)', "peak_slip_ratio"),
+            (r'peak_slip_angle\s*[:=]\s*([\d.]+)', "peak_slip_angle_deg"),
+            (r'optimal.*temp.*[:=]\s*([\d.]+)', "optimal_tire_temp_c"),
+        ]
+        
+        src_path = self.config.repo_root / "src"
+        
+        for py_file in src_path.rglob("*.py"):
+            if "__pycache__" in str(py_file):
+                continue
+            
+            try:
+                content = py_file.read_text()
+                rel_path = str(py_file.relative_to(self.config.repo_root))
+                
+                for pattern, spec_key in search_patterns:
+                    for match in re.finditer(pattern, content, re.IGNORECASE):
+                        value = float(match.group(1))
+                        spec = gt3_specs.get(spec_key)
+                        
+                        if spec:
+                            in_range = spec["range"][0] <= value <= spec["range"][1]
+                            findings.append({
+                                "parameter": spec_key,
+                                "found_value": value,
+                                "target": spec["target"],
+                                "range": spec["range"],
+                                "unit": spec["unit"],
+                                "in_spec": in_range,
+                                "file": rel_path,
+                            })
+                            
+            except Exception:
+                pass
+        
+        # Build comparison summary
+        specs_checked = set(f["parameter"] for f in findings)
+        specs_missing = set(gt3_specs.keys()) - specs_checked
+        
+        out_of_spec = [f for f in findings if not f["in_spec"]]
+        in_spec = [f for f in findings if f["in_spec"]]
+        
+        return {
+            "gt3_specifications": gt3_specs,
+            "findings": findings,
+            "in_spec_count": len(in_spec),
+            "out_of_spec_count": len(out_of_spec),
+            "out_of_spec": out_of_spec,
+            "specs_not_found": list(specs_missing),
+        }

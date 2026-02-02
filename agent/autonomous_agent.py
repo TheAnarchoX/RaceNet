@@ -459,8 +459,11 @@ For each task, provide clear requirements and acceptance criteria."""
         event_data = getattr(event, "data", None)
         
         if event_type_str == "assistant.message":
-            # Handle assistant message
-            content = getattr(event_data, "content", "") if event_data else ""
+            # Handle assistant message - check both content and delta_content for streaming
+            content = (
+                getattr(event_data, "content", "") or 
+                getattr(event_data, "delta_content", "")
+            ) if event_data else ""
             if content:
                 print(content, end="", flush=True)
                 self._response_content += content
@@ -583,7 +586,7 @@ class MockCopilotSession:
             task_id = task_match.group(1) if task_match else "unknown"
             
             response_parts.append(f"\n[Mock Mode] Working on Task {task_id}")
-            response_parts.append("[Mock Mode] In dry-run mode, simulating tool calls:")
+            response_parts.append("[Mock Mode] Simulating tool calls (SDK not installed):")
             
             # Simulate some tool calls
             if self.tool_handler:
@@ -595,8 +598,9 @@ class MockCopilotSession:
                     pass
                 
                 response_parts.append("  → Simulating file reads and edits")
+                response_parts.append("  → Task simulation complete")
             
-            response_parts.append("[Mock Mode] Task work simulation complete.\n")
+            response_parts.append("[Mock Mode] Install github-copilot-sdk for real agent behavior.\n")
         
         elif "planner" in prompt_lower or "analyze" in prompt_lower:
             response_parts.append("\n[Mock Mode] Running planner analysis...")
@@ -613,7 +617,7 @@ class MockCopilotSession:
         
         else:
             response_parts.append(f"\n[Mock Mode] Received prompt ({len(prompt)} chars)")
-            response_parts.append("[Mock Mode] In dry-run mode, no actual changes will be made.\n")
+            response_parts.append("[Mock Mode] SDK not installed - simulating response.\n")
         
         response_content = "\n".join(response_parts)
         
