@@ -582,9 +582,22 @@ Start by exploring what you need to do."""
     
     async def _send_message(self, content: str):
         """Send a message to Copilot using SDK best practices."""
+        async def _log_waiting():
+            elapsed = 0
+            interval = 15
+            while True:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                logger.info(f"[{self.agent_id}] Waiting for response... {elapsed}s elapsed")
+
+        progress_task = None
+
         try:
             # Reset response buffer
             self._response_content = ""
+
+            # Start progress logger
+            progress_task = asyncio.create_task(_log_waiting())
             
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
@@ -602,6 +615,9 @@ Start by exploring what you need to do."""
             logger.error(f"[{self.agent_id}] Request timed out after {timeout // 60} minutes")
         except Exception as e:
             logger.error(f"[{self.agent_id}] Error: {e}")
+        finally:
+            if progress_task:
+                progress_task.cancel()
     
     def _handle_event(self, event):
         """Handle events from Copilot session.
@@ -618,16 +634,29 @@ Start by exploring what you need to do."""
             event_type_str = str(event_type) if event_type else ""
         
         event_data = getattr(event, "data", None)
+
+        def _extract_message_text(data):
+            if not data:
+                return ""
+            return (
+                getattr(data, "content", "") or
+                getattr(data, "delta_content", "") or
+                getattr(data, "partial_output", "") or
+                getattr(data, "message", "") or
+                getattr(data, "summary_content", "") or
+                ""
+            )
         
         if event_type_str == "assistant.message":
-            # Handle both content and delta_content for streaming
-            content = (
-                getattr(event_data, "content", "") or 
-                getattr(event_data, "delta_content", "")
-            ) if event_data else ""
+            # Handle assistant message (streaming-safe)
+            content = _extract_message_text(event_data)
             if content:
                 print(f"[{self.agent_id}] {content}", end="", flush=True)
                 self._response_content += content
+        elif event_type_str == "assistant.turn_start":
+            logger.info(f"[{self.agent_id}] Assistant turn started")
+        elif event_type_str == "assistant.turn_end":
+            logger.info(f"[{self.agent_id}] Assistant turn ended")
         
         elif event_type_str == "tool.execution_start":
             tool_name = (
@@ -636,15 +665,23 @@ Start by exploring what you need to do."""
                 getattr(event_data, "name", None) or
                 ""
             ) if event_data else ""
-            logger.debug(f"[{self.agent_id}]   → Running: {tool_name}")
+            logger.info(f"[{self.agent_id}]   → Running: {tool_name}")
         
         elif event_type_str == "tool.execution_complete":
             tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
-            logger.debug(f"[{self.agent_id}]   ✓ Completed: {tool_call_id}")
+            tool_name = (
+                getattr(event_data, "toolName", None) or
+                getattr(event_data, "tool_name", None) or
+                getattr(event_data, "name", None) or
+                ""
+            ) if event_data else ""
+            logger.info(f"[{self.agent_id}]   ✓ Completed: {tool_name or tool_call_id}")
         
         elif event_type_str == "session.error":
             message = getattr(event_data, "message", "Unknown error") if event_data else "Unknown error"
             logger.error(f"[{self.agent_id}] Session error: {message}")
+        elif event_type_str == "session.idle":
+            logger.info(f"[{self.agent_id}] Session idle")
     
     async def _handle_tool_call(self, name: str, params: dict) -> str:
         """Handle tool calls including hive-specific tools."""
@@ -796,6 +833,7 @@ Start by exploring what you need to do."""
     
     async def _cleanup(self):
         """Clean up resources using SDK best practices."""
+        logger.info(f"[{self.agent_id}] Cleaning up worker resources...")
         # Release any held file locks
         locks = self.memory.get_locked_files()
         for file_path, holder in locks.items():
@@ -805,19 +843,23 @@ Start by exploring what you need to do."""
         # Destroy session (not close - SDK best practice)
         if self._session:
             try:
-                await self._session.destroy()
+                await asyncio.wait_for(self._session.destroy(), timeout=5.0)
                 logger.debug(f"[{self.agent_id}] Session destroyed")
+            except asyncio.TimeoutError:
+                logger.warning(f"[{self.agent_id}] Session destroy timed out")
             except Exception as e:
                 logger.warning(f"[{self.agent_id}] Error destroying session: {e}")
         
         # Stop client and get cleanup errors (SDK best practice)
         if self._client:
             try:
-                errors = await self._client.stop()
+                errors = await asyncio.wait_for(self._client.stop(), timeout=5.0)
                 if errors:
                     for error in errors:
                         logger.warning(f"[{self.agent_id}] Cleanup error: {error.message}")
                 logger.debug(f"[{self.agent_id}] Client stopped")
+            except asyncio.TimeoutError:
+                logger.warning(f"[{self.agent_id}] Client stop timed out")
             except Exception as e:
                 logger.warning(f"[{self.agent_id}] Error stopping client: {e}")
 
@@ -874,6 +916,20 @@ class MultiAgentOrchestrator:
         logger.info(f"Model: {self.config.model}")
         logger.info(f"Repository: {self.config.repo_root}")
         logger.info("=" * 70)
+
+        # Clean up stale agents and locks from previous runs
+        try:
+            cleanup = self.memory.cleanup_stale_state(timeout_seconds=120)
+            if cleanup["stale_agents_removed"] or cleanup["orphaned_locks_removed"]:
+                logger.info(
+                    "Cleanup on start: removed stale agents %s, orphaned locks %s",
+                    cleanup["stale_agents_removed"],
+                    cleanup["orphaned_locks_removed"],
+                )
+            else:
+                logger.info("Cleanup on start: no stale agents or orphaned locks found")
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(f"Startup cleanup failed: {exc}")
         
         # Setup signal handlers
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1002,11 +1058,20 @@ class MultiAgentOrchestrator:
     
     async def _cleanup(self):
         """Clean up resources."""
-        logger.info("Cleaning up...")
+        logger.info("Cleaning up orchestrator...")
         
         # Wait for all worker tasks to complete
         if self._tasks:
-            await asyncio.gather(*self._tasks, return_exceptions=True)
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*self._tasks, return_exceptions=True),
+                    timeout=10.0,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for worker tasks to finish; cancelling")
+                for task in self._tasks:
+                    task.cancel()
+                await asyncio.gather(*self._tasks, return_exceptions=True)
         
         # Print final summary
         self._print_status()

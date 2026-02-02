@@ -9,6 +9,7 @@ import asyncio
 import logging
 import re
 import sys
+import time
 from typing import Any, Callable, Optional
 
 from agent.config import AgentConfig
@@ -161,6 +162,7 @@ class AutonomousAgent:
         self._tasks_completed = 0
         self._shutting_down = False
         self._response_content = ""
+        self._last_event_time = time.monotonic()
         
         # Setup logging
         self._setup_logging()
@@ -418,11 +420,30 @@ For each task, provide clear requirements and acceptance criteria."""
     async def _send_message(self, content: str):
         """Send a message and wait for response using SDK best practices."""
         logger.info("Sending message to Copilot...")
-        
+
+        async def _log_waiting():
+            elapsed = 0
+            interval = 15
+            while True:
+                await asyncio.sleep(interval)
+                elapsed += interval
+                since_last = time.monotonic() - self._last_event_time
+                logger.info(
+                    "Waiting for response... %ss elapsed (last event %ss ago)",
+                    elapsed,
+                    int(since_last),
+                )
+
+        progress_task = None
+
         try:
             # Reset response buffer
             self._response_content = ""
-            
+            self._last_event_time = time.monotonic()
+
+            # Start progress logger
+            progress_task = asyncio.create_task(_log_waiting())
+
             # Use send_and_wait() which combines send() with waiting for idle
             # Events are still delivered to on() handlers while waiting
             timeout = self.config.request_timeout
@@ -430,16 +451,19 @@ For each task, provide clear requirements and acceptance criteria."""
                 {"prompt": content},
                 timeout=timeout
             )
-            
+
             print()  # New line after response
             logger.info("Response complete")
-            
+
             return response
-            
+
         except asyncio.TimeoutError:
             logger.error(f"Request timed out after {timeout // 60} minutes")
         except Exception as e:
             logger.error(f"Error sending message: {e}")
+        finally:
+            if progress_task:
+                progress_task.cancel()
     
     def _handle_event(self, event: Any):
         """Handle events from Copilot session.
@@ -457,16 +481,30 @@ For each task, provide clear requirements and acceptance criteria."""
             event_type_str = str(event_type) if event_type else ""
         
         event_data = getattr(event, "data", None)
+        self._last_event_time = time.monotonic()
+
+        def _extract_message_text(data: Any) -> str:
+            if not data:
+                return ""
+            return (
+                getattr(data, "content", "") or
+                getattr(data, "delta_content", "") or
+                getattr(data, "partial_output", "") or
+                getattr(data, "message", "") or
+                getattr(data, "summary_content", "") or
+                ""
+            )
         
         if event_type_str == "assistant.message":
-            # Handle assistant message - check both content and delta_content for streaming
-            content = (
-                getattr(event_data, "content", "") or 
-                getattr(event_data, "delta_content", "")
-            ) if event_data else ""
+            # Handle assistant message (streaming-safe)
+            content = _extract_message_text(event_data)
             if content:
                 print(content, end="", flush=True)
                 self._response_content += content
+        elif event_type_str == "assistant.turn_start":
+            logger.info("Assistant turn started")
+        elif event_type_str == "assistant.turn_end":
+            logger.info("Assistant turn ended")
         
         elif event_type_str == "tool.execution_start":
             # Log tool execution start - try multiple attribute names
@@ -481,7 +519,13 @@ For each task, provide clear requirements and acceptance criteria."""
         elif event_type_str == "tool.execution_complete":
             # Log tool execution complete
             tool_call_id = getattr(event_data, "toolCallId", "") if event_data else ""
-            logger.debug(f"  ✓ Completed: {tool_call_id}")
+            tool_name = (
+                getattr(event_data, "toolName", None) or
+                getattr(event_data, "tool_name", None) or
+                getattr(event_data, "name", None) or
+                ""
+            ) if event_data else ""
+            logger.info(f"  ✓ Completed: {tool_name or tool_call_id}")
         
         elif event_type_str == "session.error":
             # Handle session errors
@@ -490,10 +534,11 @@ For each task, provide clear requirements and acceptance criteria."""
         
         elif event_type_str == "session.idle":
             # Session is idle (request complete)
-            logger.debug("Session idle")
+            logger.info("Session idle")
     
     async def _cleanup(self):
         """Clean up resources using SDK best practices with timeout protection."""
+        logger.info("Starting agent cleanup...")
         # Destroy session (not close - SDK best practice)
         if self.session:
             try:
@@ -519,6 +564,7 @@ For each task, provide clear requirements and acceptance criteria."""
         
         # Log summary
         logger.info("=" * 60)
+        logger.info("Agent cleanup finished")
         logger.info("Agent Session Complete")
         logger.info(f"Iterations: {self._iteration}")
         logger.info(f"Tasks completed: {self._tasks_completed}")

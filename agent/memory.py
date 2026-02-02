@@ -496,7 +496,10 @@ class RepositoryMemory:
             conn.close()
     
     def clear_stale_agents(self, timeout_seconds: int = 120):
-        """Clear agents that haven't sent a heartbeat recently."""
+        """Clear agents that haven't sent a heartbeat recently.
+
+        This also removes file locks and messages associated with stale agents.
+        """
         with self._lock:
             conn = self._get_connection()
             cursor = conn.cursor()
@@ -518,11 +521,63 @@ class RepositoryMemory:
             for agent_id in stale_ids:
                 cursor.execute("DELETE FROM agent_states WHERE agent_id = ?", (agent_id,))
                 cursor.execute("DELETE FROM file_locks WHERE agent_id = ?", (agent_id,))
+                cursor.execute(
+                    "DELETE FROM messages WHERE from_agent = ? OR to_agent = ?",
+                    (agent_id, agent_id)
+                )
             
             conn.commit()
             conn.close()
             
             return stale_ids
+
+    def cleanup_stale_state(self, timeout_seconds: int = 120) -> dict:
+        """Clean up stale agents, orphaned locks, and related messages.
+
+        Returns a summary of cleanup actions taken.
+        """
+        with self._lock:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Identify stale agents by heartbeat
+            cutoff = datetime.now().timestamp() - timeout_seconds
+            cursor.execute("SELECT agent_id, last_heartbeat FROM agent_states")
+            stale_ids = []
+            for row in cursor.fetchall():
+                try:
+                    heartbeat = datetime.fromisoformat(row[1]).timestamp()
+                    if heartbeat < cutoff:
+                        stale_ids.append(row[0])
+                except (ValueError, TypeError):
+                    stale_ids.append(row[0])
+
+            # Remove stale agents and their data
+            for agent_id in stale_ids:
+                cursor.execute("DELETE FROM agent_states WHERE agent_id = ?", (agent_id,))
+                cursor.execute("DELETE FROM file_locks WHERE agent_id = ?", (agent_id,))
+                cursor.execute(
+                    "DELETE FROM messages WHERE from_agent = ? OR to_agent = ?",
+                    (agent_id, agent_id)
+                )
+
+            # Remove orphaned file locks (agent no longer exists)
+            cursor.execute("SELECT file_path, agent_id FROM file_locks")
+            locks = cursor.fetchall()
+            orphaned_locks = []
+            for file_path, agent_id in locks:
+                cursor.execute("SELECT 1 FROM agent_states WHERE agent_id = ?", (agent_id,))
+                if not cursor.fetchone():
+                    orphaned_locks.append(file_path)
+                    cursor.execute("DELETE FROM file_locks WHERE file_path = ?", (file_path,))
+
+            conn.commit()
+            conn.close()
+
+            return {
+                "stale_agents_removed": stale_ids,
+                "orphaned_locks_removed": orphaned_locks,
+            }
     
     # =========================================================================
     # File Locking for Conflict Prevention

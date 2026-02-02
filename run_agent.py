@@ -193,7 +193,7 @@ def print_banner(mode: str = "single"):
         banner = """
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                                                                       ║
-║   🏎️  RaceNet Autonomous Agent Hive                                   ║
+║   🏎️  RaceNet Autonomous Agent Hive                                     ║
 ║                                                                       ║
 ║   Powered by GitHub Copilot SDK + Hive Mind                           ║
 ║   Model: GPT-5.2-Codex                                                ║
@@ -212,7 +212,7 @@ def print_banner(mode: str = "single"):
         banner = """
 ╔═══════════════════════════════════════════════════════════════════════╗
 ║                                                                       ║
-║   🗺️  RaceNet Strategic Planner                                       ║
+║   🗺️  RaceNet Strategic Planner                                         ║
 ║                                                                       ║
 ║   Powered by GitHub Copilot SDK                                       ║
 ║   Model: GPT-5.2-Codex                                                ║
@@ -232,7 +232,7 @@ def print_banner(mode: str = "single"):
         banner = """
 ╔═══════════════════════════════════════════════════════════════╗
 ║                                                               ║
-║   🏎️  RaceNet Autonomous Agent                                ║
+║   🏎️  RaceNet Autonomous Agent                                  ║
 ║                                                               ║
 ║   Powered by GitHub Copilot SDK                               ║
 ║   Model: GPT-5.2-Codex                                        ║
@@ -495,11 +495,17 @@ def run_with_timeout():
     def force_exit(signum, frame):
         nonlocal shutdown_initiated
         if shutdown_initiated:
-            print("\n🔴 Forced shutdown!")
+            try:
+                os.write(2, "\n🔴 Forced shutdown!\n".encode("utf-8"))
+            except Exception:
+                pass
             os._exit(1)
         else:
             shutdown_initiated = True
-            print("\n⏳ Shutting down (press Ctrl+C again to force)...")
+            try:
+                os.write(2, "\n⏳ Shutting down (press Ctrl+C again to force)...\n".encode("utf-8"))
+            except Exception:
+                pass
     
     # Set up signal handlers before asyncio.run
     signal.signal(signal.SIGINT, force_exit)
